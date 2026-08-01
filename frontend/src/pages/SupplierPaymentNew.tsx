@@ -21,6 +21,8 @@ export default function SupplierPaymentNew() {
   const [step, setStep] = useState<1 | 2 | 3>(1)
   const [suppliers, setSuppliers] = useState<Supplier[]>([])
   const [supplierId, setSupplierId] = useState('')
+  const [supplierName, setSupplierName] = useState('')
+  const [showSuggestions, setShowSuggestions] = useState(false)
   const [eligibles, setEligibles] = useState<EligibleBordereau[]>([])
   const [selected, setSelected] = useState<Record<string, boolean>>({})
   const [montants, setMontants] = useState<Record<string, string>>({})
@@ -35,6 +37,26 @@ export default function SupplierPaymentNew() {
       .then((r: any) => setSuppliers((r.items ?? r) as Supplier[]))
       .catch((e) => setError(e?.message ?? 'Erreur'))
   }, [])
+
+  // Saisie libre : à chaque frappe on rafraîchit la liste fournisseurs et on
+  // filtre les actifs dont le nom contient le texte (insensible à la casse).
+  function onSupplierInput(v: string) {
+    setSupplierName(v)
+    setSupplierId('')
+    setStep(1)
+    setEligibles([])
+    setShowSuggestions(true)
+    getSuppliers()
+      .then((r: any) => setSuppliers((r.items ?? r) as Supplier[]))
+      .catch(() => {})
+  }
+
+  const suggestions = supplierName.trim()
+    ? suppliers
+        .filter((s: any) => s.isActive !== false)
+        .filter((s) => (s.name ?? '').toLowerCase().includes(supplierName.trim().toLowerCase()))
+        .slice(0, 8)
+    : []
 
   async function chargerEligibles() {
     if (!supplierId) return
@@ -115,23 +137,39 @@ export default function SupplierPaymentNew() {
       {/* Étape 1 : fournisseur */}
       <Card className="mb-4">
         <Field label={ar ? 'المورد' : 'Fournisseur'}>
-          <Select
-            value={supplierId}
-            onChange={(e) => {
-              setSupplierId(e.target.value)
-              setStep(1)
-              setEligibles([])
-            }}
-          >
-            <option value="">{ar ? '— اختر —' : '— Choisir —'}</option>
-            {suppliers
-              .filter((s: any) => s.isActive !== false)
-              .map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-          </Select>
+          <div className="relative">
+            <Input
+              type="text"
+              value={supplierName}
+              placeholder={ar ? 'اكتب اسم المورد…' : 'Tapez le nom du fournisseur…'}
+              onChange={(e) => onSupplierInput(e.target.value)}
+              onFocus={() => setShowSuggestions(true)}
+            />
+            {showSuggestions && supplierName.trim() !== '' && !supplierId && (
+              <div className="absolute z-20 mt-1 w-full rounded-md border border-gray-200 bg-white shadow-lg max-h-60 overflow-auto">
+                {suggestions.length === 0 ? (
+                  <div className="px-3 py-2 text-sm text-gray-500">
+                    {ar ? 'لا يوجد مورد' : 'Aucun fournisseur trouvé'}
+                  </div>
+                ) : (
+                  suggestions.map((s) => (
+                    <button
+                      key={s.id}
+                      type="button"
+                      className="block w-full text-left px-3 py-2 text-sm hover:bg-gray-100"
+                      onClick={() => {
+                        setSupplierId(s.id)
+                        setSupplierName(s.name)
+                        setShowSuggestions(false)
+                      }}
+                    >
+                      {s.name}
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
         </Field>
         <div className="mt-3">
           <Button disabled={!supplierId || loading} onClick={chargerEligibles}>
@@ -154,7 +192,7 @@ export default function SupplierPaymentNew() {
             </p>
           ) : (
             <>
-              <Table headers={['', 'Réf.', 'Date clôture', 'Montant dû', 'Statut']}>
+              <Table headers={['', 'Réf.', 'Bon de réception', 'Date clôture', 'Montant dû', 'Statut']}>
                 {eligibles.map((b) => (
                   <tr
                     key={b.id}
@@ -168,6 +206,7 @@ export default function SupplierPaymentNew() {
                       />
                     </td>
                     <td className="px-4 py-3 font-semibold">{b.reference}</td>
+                    <td className="px-4 py-3">{b.receptionRef ?? '—'}</td>
                     <td className="px-4 py-3">
                       {b.dateCloture ? new Date(b.dateCloture).toLocaleDateString('fr-FR') : '—'}
                     </td>

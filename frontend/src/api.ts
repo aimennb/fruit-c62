@@ -885,6 +885,8 @@ export interface SupplierPaymentRow {
 export interface EligibleBordereau {
   id: string
   reference: string
+  receptionId?: string | null
+  receptionRef?: string | null
   dateCloture: string | null
   montantFinalDu: string
   statut: string

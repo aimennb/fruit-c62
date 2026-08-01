@@ -111,10 +111,23 @@ router.get('/eligible/:supplierId', async (req: Request, res: Response) => {
       },
       orderBy: [{ dateCloture: 'asc' }, { createdAt: 'asc' }],
     });
+    // La relation SupplierBordereau -> SupplierReception n'existe pas dans le
+    // schéma (receptionId est un simple champ scalaire) : on charge les BR en
+    // une seule requête puis on mappe par id.
+    const receptionIds = Array.from(new Set(rows.map((b) => b.receptionId).filter(Boolean)));
+    const receptions = receptionIds.length
+      ? await prisma.supplierReception.findMany({
+          where: { id: { in: receptionIds as string[] } },
+          select: { id: true, reference: true },
+        })
+      : [];
+    const refParId = new Map(receptions.map((r) => [r.id, r.reference]));
     res.json({
       items: rows.map((b) => ({
         id: b.id,
         reference: b.reference,
+        receptionId: b.receptionId ?? null,
+        receptionRef: (b.receptionId && refParId.get(b.receptionId)) ?? null,
         dateCloture: b.dateCloture,
         montantFinalDu: dec(b.montantFinalDu),
         statut: b.statut,
@@ -349,9 +362,27 @@ router.post('/', async (req: Request, res: Response) => {
       if (mode === 'PAY' && method === 'CASH') {
         const day = await getOrCreateDay(tx, datePaiement);
         if (day.status === 'cloturee') {
-          const e: any = new Error('Journée clôturée : saisie impossible');
-          e.status = 409;
-          throw e;
+          // Réouverture automatique silencieuse : un paiement fournisseur en
+          // espèces ne doit jamais être bloqué par une clôture du jour.
+          await tx.cashRegisterDay.update({
+            where: { id: day.id },
+            data: { status: 'ouverte', closedBy: null, closedAt: null },
+          });
+          try {
+            await tx.cashRegisterAuditLog.create({
+              data: {
+                cashRegisterDayId: day.id,
+                action: 'reouverture',
+                userId,
+                details: {
+                  motif: 'Paiement fournisseur CASH sur jour clôturé',
+                  paymentRef: payment.reference,
+                },
+              },
+            });
+          } catch {
+            /* l'audit ne doit jamais bloquer le paiement */
+          }
         }
         await assertPasDeDoublon(tx, 'SUPPLIER_PAYMENT', payment.id);
         await tx.cashRegisterEntry.create({
