@@ -579,8 +579,12 @@ router.get('/days/:date/credit-sales', async (req: Request, res: Response) => {
       });
       for (const p of grp) if (p.invoiceId) encaisse.set(p.invoiceId, D(p._sum.amount ?? 0));
     }
+    // Doit correspondre EXACTEMENT à l'agrégat creditInvoiceTotal (calculé plus
+    // haut) : toute facture du jour non entièrement payée (SENT, PARTIALLY_PAID,
+    // OVERDUE). Sinon l'agrégat montre un montant mais la liste reste vide.
+    // NB : DRAFT n'est pas comptabilisé (ni en agrégat, ni ici).
     const items = factures
-      .filter((f) => f.status === 'OVERDUE' || (encaisse.get(f.id) ?? ZERO).isZero())
+      .filter((f) => f.status !== 'PAID')
       .map(serializeInvoiceLite);
     res.json({ date: b.dateParam, items, total: items.length });
   } catch (e: any) {
