@@ -1,6 +1,6 @@
 # PLAN Fruiterie ERP — suivi du projet
 
-**Dernière mise à jour** : 01/08/2026
+**Dernière mise à jour** : 01/08/2026 (session 2 — module Paiement Fournisseur)
 **Emplacement** : /home/mimo/fruiterie-app
 **Serveur** : http://localhost:8080 (backend Node/Express/Prisma + frontend buildé servi en dist)
 **DB** : PostgreSQL local
@@ -55,12 +55,23 @@
 
 ## 2. Roadmap restante
 
-### Priorité immédiate (prochaine session, soir)
+### Session du 01/08 (suite, soir 2) — MODULE PAIEMENT FOURNISSEUR (brainstorm + livraison)
+- **Brainstorm validé** : 1 bon = 1 fournisseur ; bordereau récupéré auto SEULEMENT si statut `cloture`/`partiellement_paye` ; 2 boutons Payer (Payment + décrément Supplier.balance) / Encaisser (impute avance fournisseur via SupplierAdvanceAllocation) ; paiement CASH = sortie caisse (CashRegisterEntry sourceType SUPPLIER_PAYMENT → autresSorties) ; recalcul anti-double (montantFinalDu, statut paye/partiellement_paye) ; bordereaux paye exclus de sélection ; PDF A4 + EAN13 préfixe 5 ; fond VERT (paye) / ORANGE (partiellement_paye) sur /bordereaux et /fournisseurs/detail.
+- **Modèles** : `SupplierPayment` (BP, EAN13 préfixe 5) + `SupplierPaymentLine`. Migration `20260801120000_add_supplier_payment` (appliquée via miga diff + db execute + migrate resolve --applied car shadow-DB cassée).
+- **Backend** : `routes/supplier-payments.routes.ts` (liste, eligible/:supplierId, POST transactionnel, :id, :id/pdf) + `supplier-payments/pdf.ts` (A4). Réutilise `getOrCreateDay`/`assertPasDeDoublon`/`recalculerEtPersister` de cash-register.routes (exportés). barcode.ts préfixe 5. backfill-ean13 idempotent préfixe 5.
+- **Frontend** : api.ts (+4 fns), App.tsx (3 routes), Layout (lien sidebar), SupplierPaymentsPage / SupplierPaymentNew (3 étapes SPA) / SupplierPaymentDetail, coloration Bordereaux.tsx + SupplierDetail.tsx.
+- **Vérif chef en VRAI** : health OK ; GET liste (0 après nettoyage) ; POST PAY CASH 2000 → bordereau partiellement_paye + montantFinalDu DB=1000 + sortie caisse totalOutputs=2000 ; POST PAY BANK_TRANSFER → statut paye, PAS de caisse ; POST ENCAISSER → avance ALLOCATED, PAS de caisse/balance ; PDF 200 application/pdf 5200o ; capture navigateur étape 1/2/3 + fond VERT bordereau paye confirmé visuellement.
+- **Nettoyage** : toutes les données de test soft-deletées (BP actifs = 0).
+- **Commit** `git` OK (17 fichiers). **PUSH en attente** : PAT GitHub révoqué, pas de SSH → à refaire un PAT ou configurer SSH pour push `origin main` (`aimennb/fruit-c62`).
+
+### Priorité immédiate
 - [x] `git init` + commit + repo GitHub (`aimennb/fruit-c62`).
 - [x] Fix bug caisse credits-crees.
 - [x] Nettoyage DB + re-seed.
-- [ ] **Validation visuelle navigateur** réelle (capture) des pages caisse, édition réception, PDF, scan EAN13.
-- [ ] **Temps 2 Caisse** : export Excel, réouverture autorisée d'un jour clôturé, correction du fonds d'ouverture, i18n AR sur pages caisse.
+- [x] **Module Paiement Fournisseur** (brainstorm + livraison + vérif chef + commit). PUSH GitHub en attente (PAT révoqué).
+- [ ] **PUSH GitHub** du module Paiement Fournisseur (nécessite nouveau PAT ou SSH).
+- [ ] **Validation visuelle navigateur** complète (re-capture caisse/édition réception/scan EAN13 des livraisons 01/08 matin).
+- [ ] **Temps 2 Caisse** : export Excel, réouverture autorisée d'un jour clôturé (endpoint absent pour l'instant — le garde bloque les saisies sur jour clôturé), correction du fonds d'ouverture, i18n AR sur pages caisse.
 - [ ] **Phase D** : i18n FR/AR complet (toutes pages, RTL).
 - [ ] **Phase E** : audit QA multi-experts en lecture seule + corrections.
 - [ ] **Phase F** : packaging Tauri (.exe) + cloud + HTTPS.
