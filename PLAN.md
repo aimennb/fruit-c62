@@ -37,18 +37,28 @@
    - ⚠️ Client a ASSUMÉ le risque : édition complète autorisée même après vente.
 6. **Navigation caisse cliquable** : Stats de CaisseDayDetail deviennent des liens → 5 pages liste filtrées par date (/caisse/:date/factures, /credits-encaisses, /depenses, /credits-crees, /remises). 5 endpoints backend + 5 fonctions api.ts + 5 routes App.tsx. Tous HTTP 200 vérifiés.
 
+### Session du 01/08 (suite, soir) — LIVRAISONS + INFRA
+1. **`git init` + commit figé** `b70ea5c` (131 fichiers, node_modules/dist ignorés) — fragilité max réglée.
+2. **Fix bug `/caisse/:date/credits-crees`** `743c498` : montant affiché mais liste vide. Cause : endpoint `credit-sales` filtrait `OVERDUE OU encaisse=0`, excluant les PARTIALLY_PAID (encaisse>0) comptées dans l'agrégat `creditInvoiceTotal`. Aligné sur `status != 'PAID'`. Vérif curl + script ad-hoc : agrégat 13380 == liste 1 facture (F-2026-0017, PARTIALLY_PAID, 13380). Re-prouvé après wipe DB (facture test 100 == 100).
+3. **Nettoyage base + re-seed** : soft-delete 328 rows de test (toutes tables `deletedAt`) + purge logs (auditLog 422, session 263, cashRegisterClosing…), puis `npm run seed` (6 produits, 5 clients, 3 fournisseurs, 3 users, 29 permissions). **0 transaction active**, référentiel cohérent.
+4. **`start.sh`** `1ce6744` : lance sur macOS/Linux (deps + prisma generate/migrate/seed + build front+back + serveur :8080). Options `--no-build`, `--dev`. Prérequis Postgres documentés en tête.
+5. **Repo GitHub créé + pushé** : `aimennb/fruit-c62` (branche `main`, 133 fichiers + README). Push via PAT (révoqué après coup). Clone : `git@github.com:aimennb/fruit-c62.git`.
+
 ### Règle de travail Fruiterie (validée par Mimo)
 - **Le chef (Hermes) ne code PAS directement** → tout code délégué à des agents (subagents), y compris correctifs.
 - **Brainstorm OBLIGATOIRE avant le code** : clarifier la sémantique métier (avance, crédit, recalcul bordereau).
-- **Vérification du chef OBLIGATOIRE** : rapports agents = auto-déclarations. Le chef revérifie par grep terminal réel + curl + extraction PDF + vision sur PNG. **L'outil `search_files` donne des FAUX NÉGATIFS** (ex: `droitMarche`, `ean13`, `cash-register`) — TOUJOURS confirmer avec `grep` terminal ou `read_file`.
+- **Vérification du chef OBLIGATOIRE** : rapports agents = auto-déclarations. Le chef revérifie par grep terminal réel + curl + extraction PDF + vision sur PNG. **L'outil `search_files` donne des FAUX NÉGATIFS** — TOUJOURS confirmer avec `grep` terminal ou `read_file`.
 - Nettoyage données de test (soft-delete) après preuve.
+- **Git désormais obligatoire** : repo GitHub = source de vérité, pushé après chaque livraison.
 
 ---
 
 ## 2. Roadmap restante
 
-### Priorité immédiate
-- [ ] **`git init` + commit** de l'état actuel (≈16 livraisons) — URGENT, aucun repo.
+### Priorité immédiate (prochaine session, soir)
+- [x] `git init` + commit + repo GitHub (`aimennb/fruit-c62`).
+- [x] Fix bug caisse credits-crees.
+- [x] Nettoyage DB + re-seed.
 - [ ] **Validation visuelle navigateur** réelle (capture) des pages caisse, édition réception, PDF, scan EAN13.
 - [ ] **Temps 2 Caisse** : export Excel, réouverture autorisée d'un jour clôturé, correction du fonds d'ouverture, i18n AR sur pages caisse.
 - [ ] **Phase D** : i18n FR/AR complet (toutes pages, RTL).
@@ -62,7 +72,18 @@
 
 ---
 
-## 3. Commandes (rappel)
+## 3. Repo & lancement Mac
+```bash
+# Cloner
+git clone git@github.com:aimennb/fruit-c62.git
+cd fruit-c62
+# Postgres dispo (Docker ou Postgres.app), régler DATABASE_URL dans backend/.env
+./start.sh            # build + migrate + seed + serveur :8080
+#  Comptes : admin/admin123 · responsable/resp123 · employe/emp123
+#  Frontend servi par le backend sur http://localhost:8080
+```
+
+## 4. Commandes (rappel)
 ```bash
 # Backend
 cd /home/mimo/fruiterie-app/backend && npm run build
@@ -76,7 +97,7 @@ cd /home/mimo/fruiterie-app/frontend && npm run build
 cd /home/mimo/fruiterie-app/backend && node prisma/backfill-ean13.ts
 ```
 
-## 4. Arborescence clés (modifiés le 01/08)
+## 5. Arborescence clés (modifiés le 01/08)
 ```
 backend/src/
   routes/cash-register.routes.ts     # module Caisse + search + endpoints drill-down par date
@@ -87,6 +108,7 @@ backend/src/
   receptions/pdf.ts  bordereaux/pdf.ts  invoices/pdf.ts  # EAN13 en en-tête
   prisma/schema.prisma              # +7 modèles Caisse + ean13 (3 modèles)
   prisma/backfill-ean13.ts
+  start.sh (racine)                  # lancement macOS/Linux
 frontend/src/
   pages/CaissePage.tsx  CaisseDayDetail.tsx  DepensesPage.tsx  ExpenseNew.tsx
   pages/CashSupplyPage.tsx  CashRemittancePage.tsx  CloturePage.tsx
