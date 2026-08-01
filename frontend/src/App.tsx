@@ -33,6 +33,9 @@ import CaisseCreditCollections from './pages/CaisseCreditCollections'
 import CaisseExpenses from './pages/CaisseExpenses'
 import CaisseCreditSales from './pages/CaisseCreditSales'
 import CaisseRemittances from './pages/CaisseRemittances'
+import SupplierPaymentsPage from './pages/SupplierPaymentsPage'
+import SupplierPaymentNew from './pages/SupplierPaymentNew'
+import SupplierPaymentDetail from './pages/SupplierPaymentDetail'
 
 function Login() {
   const { login } = useAuth()
@@ -102,6 +105,9 @@ function Protected() {
         <Route path="/receptions/detail/:id" element={<ReceptionDetail />} />
         <Route path="/bordereaux" element={<Bordereaux />} />
         <Route path="/bordereaux/:id" element={<BordereauDetail />} />
+        <Route path="/paiements-fournisseur" element={<SupplierPaymentsPage />} />
+        <Route path="/paiements-fournisseur/nouveau" element={<SupplierPaymentNew />} />
+        <Route path="/paiements-fournisseur/:id" element={<SupplierPaymentDetail />} />
         <Route path="/factures/:id" element={<InvoiceDetail />} />
         {/* Module CAISSE (Temps 1) — ordre important : routes fixes avant /caisse/:date */}
         <Route path="/caisse" element={<CaissePage />} />

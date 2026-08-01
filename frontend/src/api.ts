@@ -867,3 +867,81 @@ export function searchByQuery(q: string) {
     `/api/search?q=${encodeURIComponent(q ?? '')}`,
   )
 }
+
+// =====================================================================
+// PAIEMENT FOURNISSEUR (bons BP-xxxx)
+// =====================================================================
+export interface SupplierPaymentRow {
+  id: string
+  reference: string
+  date: string
+  supplierId: string
+  supplierName: string
+  totalAmount: string
+  mode: string
+  method: string
+  ean13?: string | null
+}
+export interface EligibleBordereau {
+  id: string
+  reference: string
+  dateCloture: string | null
+  montantFinalDu: string
+  statut: string
+}
+export interface SupplierPaymentDetailDTO {
+  id: string
+  reference: string
+  ean13?: string | null
+  date: string
+  mode: string
+  method: string
+  totalAmount: string
+  notes?: string | null
+  supplier?: { id: string; name: string; phone?: string | null; wilaya?: string | null } | null
+  lines: {
+    id: string
+    bordereauId: string
+    bordereauRef: string
+    dateCloture: string | null
+    statut: string | null
+    montant: string
+    reste: string | null
+  }[]
+}
+
+export function listSupplierPayments() {
+  return request<{ items: SupplierPaymentRow[]; total: number }>('/api/supplier-payments')
+}
+export function getEligibleBordereaux(supplierId: string) {
+  return request<{ items: EligibleBordereau[]; total: number }>(
+    `/api/supplier-payments/eligible/${supplierId}`,
+  )
+}
+export function createSupplierPayment(payload: {
+  supplierId: string
+  date?: string
+  mode: 'PAY' | 'ENCAISSER'
+  method?: 'CASH' | 'BANK_TRANSFER' | 'CHECK' | 'CARD'
+  notes?: string | null
+  lines: { bordereauId: string; montant: number | string }[]
+}) {
+  return request<{ payment: SupplierPaymentRow; lines: unknown[] }>('/api/supplier-payments', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+export function getSupplierPayment(id: string) {
+  return request<SupplierPaymentDetailDTO>(`/api/supplier-payments/${id}`)
+}
+export async function openSupplierPaymentPdf(id: string): Promise<void> {
+  const token = getToken()
+  const res = await fetch(`${API}/api/supplier-payments/${id}/pdf`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (!res.ok) throw new ApiError(`PDF échec (${res.status})`, res.status)
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  window.open(url, '_blank')
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
+}

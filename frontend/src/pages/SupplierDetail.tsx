@@ -37,6 +37,13 @@ interface BordereauRow {
   product?: { id: string; name: string }
 }
 
+/** Fond de ligne selon le statut de paiement : vert = payé, orange = partiel. */
+function rowBg(s: string): string {
+  if (s === 'paye') return 'bg-[#d4edda] hover:bg-[#c3e6cb]'
+  if (s === 'partiellement_paye') return 'bg-[#fff3cd] hover:bg-[#ffeeba]'
+  return 'hover:bg-gray-50'
+}
+
 function statutColor(s: string): string {
   switch (s) {
     case 'ouvert':
@@ -205,7 +212,7 @@ export default function SupplierDetail() {
             ) : (
               <Table headers={bordereauHeaders}>
                 {filteredBordereaux.map((b) => (
-                  <tr key={b.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => navigate(`/bordereaux/${b.id}`)}>
+                  <tr key={b.id} className={`${rowBg(b.statut)} cursor-pointer`} onClick={() => navigate(`/bordereaux/${b.id}`)}>
                     <td className="px-4 py-3 font-semibold text-gray-800 whitespace-nowrap">{b.reference}</td>
                     <td className="px-4 py-3 whitespace-nowrap">{b.product?.name ?? '—'}</td>
                     <td className="px-4 py-3 text-center">{Number(b.colisRecus)}</td>

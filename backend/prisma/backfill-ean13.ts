@@ -28,7 +28,10 @@ function buildEan13(prefix: string, sequence: number): string {
   return base + String(ean13Checksum(base));
 }
 
-async function backfill(delegateName: 'invoice' | 'supplierReception' | 'supplierBordereau', prefix: string) {
+async function backfill(
+  delegateName: 'invoice' | 'supplierReception' | 'supplierBordereau' | 'supplierPayment',
+  prefix: string,
+) {
   const delegate = (prisma as any)[delegateName];
   const existing: { ean13: string | null }[] = await delegate.findMany({
     where: { ean13: { not: null } },
@@ -69,7 +72,8 @@ async function main() {
   const a = await backfill('invoice', '2');
   const b = await backfill('supplierReception', '3');
   const c = await backfill('supplierBordereau', '4');
-  console.log(`TOTAL: ${a + b + c} document(s) nouvellement codés.`);
+  const d = await backfill('supplierPayment', '5');
+  console.log(`TOTAL: ${a + b + c + d} document(s) nouvellement codés.`);
 }
 
 main()

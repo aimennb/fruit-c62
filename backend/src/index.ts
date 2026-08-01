@@ -19,6 +19,7 @@ import productCategoriesRoutes from './routes/product-categories.routes';
 import unitsRoutes from './routes/units.routes';
 import paymentsRoutes from './routes/payments.routes';
 import cashRegisterRoutes from './routes/cash-register.routes';
+import supplierPaymentsRoutes from './routes/supplier-payments.routes';
 import { buildStubRouters } from './routes/stub.routes';
 import bulletinsRoutes from './bulletins/bulletins.routes';
 import stockRoutes from './routes/stock.routes';
@@ -91,6 +92,8 @@ app.use('/api/payments', paymentsRoutes);
 
 // --- Module CAISSE (Temps 1) ----------------------------------------
 app.use('/api/cash-register', cashRegisterRoutes);
+
+app.use('/api/supplier-payments', supplierPaymentsRoutes);
 
 // --- Stubs documentés (modules métier Phase B/C/D) -------------------
 for (const { path, router } of buildStubRouters()) {

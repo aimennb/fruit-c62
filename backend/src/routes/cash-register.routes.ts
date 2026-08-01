@@ -52,7 +52,7 @@ function heureCourante(): string {
 }
 
 /** Récupère (ou crée) la journée de caisse pour une date donnée. */
-async function getOrCreateDay(tx: Prisma.TransactionClient, date: string | Date) {
+export async function getOrCreateDay(tx: Prisma.TransactionClient, date: string | Date) {
   const d = jour(date);
   const existant = await tx.cashRegisterDay.findUnique({ where: { date: d } });
   if (existant) return existant;
@@ -314,7 +314,7 @@ function serializeTotaux(t: TotauxJour) {
 }
 
 /** Vérifie l'absence de doublon (sourceType, sourceId) avant insertion. */
-async function assertPasDeDoublon(
+export async function assertPasDeDoublon(
   tx: Prisma.TransactionClient,
   sourceType: string,
   sourceId: string,

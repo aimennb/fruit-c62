@@ -308,8 +308,51 @@ model Supplier {
   bulletins      PurchaseBulletin[]
   productLinks   ProductSupplier[]
   sales          Sale[]
+  supplierPayments SupplierPayment[]
 
   @@index([deletedAt])
+}
+
+// ---------------------------------------------------------------------
+// PAIEMENT FOURNISSEUR — « Bon de paiement fournisseur » (BP-xxxx).
+// Un bon regroupe plusieurs bordereaux clôturés d'UN SEUL fournisseur.
+//   mode PAY       -> sortie d'argent (Payment + éventuelle sortie caisse)
+//   mode ENCAISSER -> imputation d'une avance déjà versée (pas de caisse)
+// ---------------------------------------------------------------------
+model SupplierPayment {
+  id          String        @id @default(cuid())
+  reference   String        @unique // BP-2026-0001
+  ean13       String?       @unique // code-barres EAN13 (préfixe 5)
+  supplierId  String
+  supplier    Supplier      @relation(fields: [supplierId], references: [id])
+  date        DateTime      @default(now())
+  mode        String        @default("PAY") // 'PAY' | 'ENCAISSER'
+  method      PaymentMethod @default(CASH)
+  totalAmount Decimal       @default(0) @db.Decimal(14, 2)
+  notes       String?
+  createdBy   String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  deletedAt   DateTime?
+
+  lines SupplierPaymentLine[]
+
+  @@index([supplierId])
+  @@index([date])
+  @@index([deletedAt])
+}
+
+model SupplierPaymentLine {
+  id          String            @id @default(cuid())
+  paymentId   String
+  payment     SupplierPayment   @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  bordereauId String
+  bordereau   SupplierBordereau @relation(fields: [bordereauId], references: [id])
+  montant     Decimal           @db.Decimal(14, 2)
+  createdAt   DateTime          @default(now())
+
+  @@index([paymentId])
+  @@index([bordereauId])
 }
 
 // ---------------------------------------------------------------------
@@ -1009,6 +1052,8 @@ model SupplierBordereau {
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
   deletedAt             DateTime?
+
+  paymentLines SupplierPaymentLine[]
 
   @@index([supplierId])
   @@index([productId])

@@ -18,6 +18,7 @@ const NAV: NavItem[] = [
   { to: '/fournisseurs', fr: 'Fournisseurs', ar: 'الموردون' },
   { to: '/clients', fr: 'Clients', ar: 'الزبائن' },
   { to: '/avances', fr: 'Avances fournisseurs', ar: 'السلف للموردين' },
+  { to: '/paiements-fournisseur', fr: 'Paiement fournisseur', ar: 'دفع الموردين' },
   { to: '/receptions', fr: 'Réceptions', ar: 'وصولات الاستلام' },
   { to: '/caisse', fr: 'Caisse', ar: 'الصندوق' },
   { to: '/depenses', fr: 'Dépenses', ar: 'المصاريف' },
@@ -50,6 +51,9 @@ const ICONS: Record<string, ReactNode> = {
   ),
   '/avances': (
     <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9 10h6M9 14h6"/></svg>
+  ),
+  '/paiements-fournisseur': (
+    <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20M6 15h4"/></svg>
   ),
   '/caisse': (
     <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6 10v4M18 10v4"/></svg>

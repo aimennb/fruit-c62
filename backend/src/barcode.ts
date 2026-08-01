@@ -13,6 +13,7 @@ export const EAN_PREFIX = {
   invoice: '2',
   reception: '3',
   bordereau: '4',
+  supplierPayment: '5',
 } as const;
 
 export type DocKind = keyof typeof EAN_PREFIX;
@@ -54,6 +55,7 @@ export function kindFromEan13(code: string): DocKind | null {
     case '2': return 'invoice';
     case '3': return 'reception';
     case '4': return 'bordereau';
+    case '5': return 'supplierPayment';
     default: return null;
   }
 }
