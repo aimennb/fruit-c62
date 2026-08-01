@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Uploaded/generated data (runtime)
+backend/uploads/
+*.pdf.tmp
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
