@@ -55,6 +55,12 @@
 
 ## 2. Roadmap restante
 
+### Session du 01/08 (soir 3) — CORRECTIFS Paiement Fournisseur (validés chef en vrai)
+- **MODIF 1** : Étape 1 = champ fournisseur SAISIE LIBRE (taper le nom → suggestions cliquables filtrées sur getSuppliers, aucune création auto). `SupplierPaymentNew.tsx` : Input + dropdown suggestions.
+- **MODIF 2** : Étape 2 = colonne « Bon de réception » (BR-xxxx) ajoutée au tableau. Backend eligible renvoie `receptionRef` (relation bordereau.receptionId → SupplierReception.reference, chargée en 1 requête). 
+- **MODIF 3** : Caisse = PLUS d'erreur 409 sur jour clôturé. Si un paiement CASH arrive sur un jour clôturé, le backend le RÉOUVRE automatiquement (statut 'ouverte', closedBy/closedAt null) + log audit 'reouverture', puis crée la sortie + recalcule. Vérif chef : POST PAY CASH sur 01/08 clôturé → 201 BP-2026-0007, totalOutputs 2000→4000.
+- Builds backend+frontend 0 erreur. Données test nettoyées (0 BP actif, jour 01/08 remis outputs=0). Commit `e03e6a1`.
+
 ### Session du 01/08 (suite, soir 2) — MODULE PAIEMENT FOURNISSEUR (brainstorm + livraison)
 - **Brainstorm validé** : 1 bon = 1 fournisseur ; bordereau récupéré auto SEULEMENT si statut `cloture`/`partiellement_paye` ; 2 boutons Payer (Payment + décrément Supplier.balance) / Encaisser (impute avance fournisseur via SupplierAdvanceAllocation) ; paiement CASH = sortie caisse (CashRegisterEntry sourceType SUPPLIER_PAYMENT → autresSorties) ; recalcul anti-double (montantFinalDu, statut paye/partiellement_paye) ; bordereaux paye exclus de sélection ; PDF A4 + EAN13 préfixe 5 ; fond VERT (paye) / ORANGE (partiellement_paye) sur /bordereaux et /fournisseurs/detail.
 - **Modèles** : `SupplierPayment` (BP, EAN13 préfixe 5) + `SupplierPaymentLine`. Migration `20260801120000_add_supplier_payment` (appliquée via miga diff + db execute + migrate resolve --applied car shadow-DB cassée).
