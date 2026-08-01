@@ -1,0 +1,11 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root { height: 100%; }
+body { margin: 0; font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; }
+[dir='rtl'] { direction: rtl; text-align: right; }
+
+/* Mobile-first: ensure touch targets >= 44px */
+button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
+.min-touch { min-height: 44px; }

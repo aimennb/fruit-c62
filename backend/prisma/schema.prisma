@@ -1,0 +1,1211 @@
+// =====================================================================
+// Fruiterie ERP - Schéma Prisma (Phase A - Fondations)
+// Cahier des charges §40 : TOUTES les entités métier + auth + audit.
+// Devise : DA (dinar algérien). L'argent est TOUJOURS en Decimal (jamais float).
+// Soft-delete via deletedAt sur toutes les entités métier.
+// createdBy / updatedBy : stockés en String (id utilisateur) pour l'audit,
+//   sans explosion de relations inverses sur User (choix d'architecte documenté).
+// =====================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------
+// ENUMS
+// ---------------------------------------------------------------------
+
+enum Role {
+  ADMIN
+  RESPONSABLE
+  EMPLOYE
+}
+
+enum AccountEntryType {
+  DEBIT // augmente ce que nous devons au fournisseur (réception marchandise)
+  CREDIT // diminue (paiement / acompte)
+}
+
+enum AdvanceStatus {
+  DISPONIBLE
+  PENDING
+  PARTIALLY_ALLOCATED
+  ALLOCATED
+  REFUNDED
+  CANCELLED
+}
+
+enum PurchaseStatus {
+  DRAFT
+  CONFIRMED
+  RECEIVED
+  CANCELLED
+}
+
+enum SaleStatus {
+  DRAFT
+  CONFIRMED
+  DELIVERED
+  CANCELLED
+}
+
+enum MovementType {
+  IN
+  OUT
+  ADJUST
+  TRANSFER
+  LOSS
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PAID
+  PARTIALLY_PAID
+  CANCELLED
+  OVERDUE
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  CHECK
+  CARD
+}
+
+enum TemplateType {
+  INVOICE
+  RECEIPT
+  PURCHASE_ORDER
+  DELIVERY_NOTE
+  LABEL
+}
+
+enum BackupType {
+  MANUAL
+  AUTO
+}
+
+enum BackupStatus {
+  PENDING
+  IN_PROGRESS
+  SUCCESS
+  FAILED
+}
+
+// Statut d'un bulletin d'achat (B.2 brouillon, B.3 validation + stock).
+enum BulletinStatus {
+  DRAFT
+  VALIDATED
+  CANCELLED
+}
+
+// ---------------------------------------------------------------------
+// AUTH / RÔLES / PERMISSIONS
+// ---------------------------------------------------------------------
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  username     String    @unique
+  passwordHash String
+  fullName     String
+  role         Role      @default(EMPLOYE)
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  sessions  Session[]
+  auditLogs AuditLog[]
+
+  @@index([role])
+  @@index([deletedAt])
+}
+
+// Permission : catalogue de permissions granulaires (ex: "USER_READ").
+model Permission {
+  id          String   @id @default(cuid())
+  code        String   @unique // ex: "USER_READ", "SALE_WRITE"
+  label       String
+  module      String // ex: "users", "sales", "purchases"
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  rolePermissions RolePermission[]
+
+  @@index([module])
+}
+
+// Mapping entre l'enum Role et les Permission (représente l'entité "Role" du §40).
+// role est un enum scalaire (Prisma n'autorise pas une relation vers un enum).
+model RolePermission {
+  role         Role
+  permissionId String
+  permission   Permission @relation(fields: [permissionId], references: [id])
+
+  @@id([role, permissionId])
+  @@index([permissionId])
+}
+
+// Sessions de refresh token (rotation). On stocke le hash du jti, pas le token brut.
+model Session {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jti         String    @unique // identifiant du refresh token
+  refreshHash String // hash du refresh token (bcrypt)
+  ip          String?
+  userAgent   String?
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// Journal d'audit / connexions (immutable).
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String // ex: "LOGIN_SUCCESS", "LOGIN_FAILED", "LOGOUT"
+  entity    String? // ex: "User", "Product"
+  entityId  String?
+  ip        String?
+  userAgent String?
+  details   Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+// ---------------------------------------------------------------------
+// RÉFÉRENTIELS PRODUITS
+// ---------------------------------------------------------------------
+
+model Unit {
+  id        String    @id @default(cuid())
+  name      String // ex: "Kilogramme"
+  symbol    String    @unique // ex: "kg"
+  isActive  Boolean   @default(true) // statut actif/archivé (referentiel)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+  createdBy String?
+  updatedBy String?
+
+  products Product[]
+
+  @@index([isActive])
+  @@index([deletedAt])
+}
+
+model ProductCategory {
+  id          String    @id @default(cuid())
+  name        String    @unique
+  description String?
+  isActive    Boolean   @default(true) // statut actif/archivé (referentiel)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+  createdBy   String?
+  updatedBy   String?
+
+  products Product[]
+
+  @@index([isActive])
+  @@index([deletedAt])
+}
+
+model Product {
+  id                 String           @id @default(cuid())
+  name               String // nom FR (§9)
+  nameAr             String? // nom arabe (§9, optionnel)
+  nameBer            String? // nom tamazight (optionnel, référentiel inclusif)
+  variety            String? // variété (§9)
+  origin             String? // origine (§9, ex: wilaya/pays)
+  quality            String? // qualité (§9, ex: 1ère/2ème catégorie)
+  calibre            String? // calibre (§9, ex: 60-70mm)
+  sku                String?          @unique
+  barcode            String?
+  categoryId         String?
+  category           ProductCategory? @relation(fields: [categoryId], references: [id])
+  unitId             String
+  unit               Unit             @relation(fields: [unitId], references: [id])
+  packaging          String? // conditionnement (§9, ex: "carton 10kg")
+  description        String?
+  avgPurchasePrice   Decimal?         @db.Decimal(14, 2) // prix achat moyen (§9)
+  lastPurchasePrice  Decimal?         @db.Decimal(14, 2) // dernier prix achat (§9)
+  suggestedSalePrice Decimal?         @db.Decimal(14, 2) // prix vente conseillé (§9)
+  alertThreshold     Decimal?         @db.Decimal(14, 2) // seuil d'alerte stock (§9)
+  notes              String? // notes (§9)
+  isActive           Boolean          @default(true)
+  reorderLevel       Decimal?         @db.Decimal(14, 2)
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  deletedAt          DateTime?
+  createdBy          String?
+  updatedBy          String?
+
+  purchaseItems  PurchaseItem[]
+  saleItems      SaleItem[]
+  invoiceItems   InvoiceItem[]
+  stockLots      StockLot[]
+  stockMovements StockMovement[]
+  priceHistories PriceHistory[]
+  bulletinItems  PurchaseBulletinItem[]
+  losses         Loss[]
+  suppliers      ProductSupplier[]
+
+  @@index([categoryId])
+  @@index([unitId])
+  @@index([deletedAt])
+}
+
+// ---------------------------------------------------------------------
+// FOURNISSEURS
+// ---------------------------------------------------------------------
+
+model Supplier {
+  id          String    @id @default(cuid())
+  name        String    @unique
+  nameAr      String? // nom arabe (§10, optionnel)
+  contactName String? // contact (§10)
+  phone       String?
+  email       String?
+  address     String?
+  commune     String? // commune (§10)
+  wilaya      String? // wilaya (§10)
+  country     String?   @default("Algérie") // pays (§10)
+  rc          String? // registre de commerce (§10)
+  nif         String? // NIF (§10)
+  ai          String? // article d'identification
+  notes       String? // notes (§10)
+  isActive    Boolean   @default(true) // statut actif/archivé (§10)
+  balance     Decimal   @default(0) @db.Decimal(14, 2) // solde compte fournisseur
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+  createdBy   String?
+  updatedBy   String?
+
+  accountEntries SupplierAccountEntry[]
+  advances       SupplierAdvance[]
+  purchases      Purchase[]
+  payments       Payment[]
+  stockLots      StockLot[]
+  bulletins      PurchaseBulletin[]
+  productLinks   ProductSupplier[]
+  sales          Sale[]
+
+  @@index([deletedAt])
+}
+
+// ---------------------------------------------------------------------
+// LIAISON PRODUIT <-> FOURNISSEURS (many-to-many produit<->fournisseur)
+// Un produit peut avoir plusieurs fournisseurs ; un fournisseur peut
+// fournir plusieurs produits. isPreferred marque le fournisseur principal.
+// ---------------------------------------------------------------------
+
+model ProductSupplier {
+  id          String   @id @default(cuid())
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  supplierId  String
+  supplier    Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  isPreferred Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@unique([productId, supplierId])
+  @@index([productId])
+  @@index([supplierId])
+}
+
+model SupplierAccountEntry {
+  id          String           @id @default(cuid())
+  supplierId  String
+  supplier    Supplier         @relation(fields: [supplierId], references: [id])
+  type        AccountEntryType
+  amount      Decimal          @db.Decimal(14, 2)
+  description String?
+  reference   String?
+  entryDate   DateTime         @default(now())
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  deletedAt   DateTime?
+  createdBy   String?
+  updatedBy   String?
+
+  @@index([supplierId])
+  @@index([entryDate])
+  @@index([deletedAt])
+}
+
+// Acompte versé au fournisseur. Champs exacts §40 + champs de suivi (B.4).
+model SupplierAdvance {
+  id              String        @id @default(cuid())
+  supplierId      String
+  supplier        Supplier      @relation(fields: [supplierId], references: [id])
+  reference       String        @unique // ex: AV-2026-0001
+  amount          Decimal       @db.Decimal(14, 2) // montant total de l'acompte
+  allocatedAmount Decimal       @default(0) @db.Decimal(14, 2) // total affecté à des achats
+  refundedAmount  Decimal       @default(0) @db.Decimal(14, 2) // total remboursé
+  advanceDate     DateTime // date de versement
+  status          AdvanceStatus @default(DISPONIBLE)
+  notes           String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  deletedAt       DateTime?
+  createdBy       String?
+  updatedBy       String?
+
+  allocations SupplierAdvanceAllocation[]
+  refunds     SupplierAdvanceRefund[]
+
+  @@index([supplierId])
+  @@index([deletedAt])
+}
+
+// Affectation d'un acompte à un achat (bulletin). Champs exacts §40 + lien bulletin (B.4).
+model SupplierAdvanceAllocation {
+  id                 String            @id @default(cuid())
+  advanceId          String
+  advance            SupplierAdvance   @relation(fields: [advanceId], references: [id])
+  purchaseId         String? // optionnel : un bulletin autonome peut ne pas avoir de Purchase lié
+  purchase           Purchase?         @relation(fields: [purchaseId], references: [id])
+  purchaseBulletinId String? // bulletin ciblé par l'affectation (B.4)
+  purchaseBulletin   PurchaseBulletin? @relation(fields: [purchaseBulletinId], references: [id])
+  bordereauId        String? // bordereau fournisseur ciblé (Étape 4)
+  amount             Decimal           @db.Decimal(14, 2) // montant affecté
+  allocatedAt        DateTime // date d'affectation
+  notes              String?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+  deletedAt          DateTime?
+  createdBy          String?
+  updatedBy          String?
+
+  @@unique([advanceId, purchaseBulletinId]) // pas d'affectation en double (avance, bulletin)
+  @@index([advanceId])
+  @@index([purchaseId])
+  @@index([purchaseBulletinId])
+  @@index([deletedAt])
+}
+
+model SupplierAdvanceRefund {
+  id         String          @id @default(cuid())
+  advanceId  String
+  advance    SupplierAdvance @relation(fields: [advanceId], references: [id])
+  amount     Decimal         @db.Decimal(14, 2)
+  refundDate DateTime
+  method     PaymentMethod?
+  notes      String?
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+  deletedAt  DateTime?
+  createdBy  String?
+  updatedBy  String?
+
+  @@index([advanceId])
+  @@index([deletedAt])
+}
+
+// ---------------------------------------------------------------------
+// CLIENTS
+// ---------------------------------------------------------------------
+
+model Customer {
+  id           String    @id @default(cuid())
+  name         String    @unique
+  nameAr       String? // nom arabe (§24, optionnel)
+  contactName  String? // contact (§24)
+  phone        String?
+  email        String?
+  address      String?
+  commune      String? // commune (§24)
+  wilaya       String? // wilaya (§24)
+  nif          String? // NIF (§24)
+  creditLimit  Decimal   @default(0) @db.Decimal(14, 2) // limite crédit (§24)
+  paymentTerms String? // conditions de paiement (§24)
+  notes        String? // notes (§24)
+  isActive     Boolean   @default(true) // statut actif/archivé (§24)
+  balance      Decimal   @default(0) @db.Decimal(14, 2) // solde compte client
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+  createdBy    String?
+  updatedBy    String?
+
+  sales       Sale[]
+  invoices    Invoice[]
+  payments    Payment[]
+  creditNotes CreditNote[]
+
+  @@index([deletedAt])
+}
+
+// ---------------------------------------------------------------------
+// ACHATS
+// ---------------------------------------------------------------------
+
+model Purchase {
+  id         String         @id @default(cuid())
+  reference  String         @unique
+  supplierId String
+  supplier   Supplier       @relation(fields: [supplierId], references: [id])
+  date       DateTime       @default(now())
+  status     PurchaseStatus @default(DRAFT)
+  subtotal   Decimal        @default(0) @db.Decimal(14, 2)
+  total      Decimal        @default(0) @db.Decimal(14, 2)
+  notes      String?
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+  deletedAt  DateTime?
+  createdBy  String?
+  updatedBy  String?
+
+  items              PurchaseItem[]
+  bulletins          PurchaseBulletin[]
+  arrivals           Arrival[]
+  advanceAllocations SupplierAdvanceAllocation[]
+  payments           Payment[]
+
+  @@index([supplierId])
+  @@index([date])
+  @@index([deletedAt])
+}
+
+model PurchaseItem {
+  id         String    @id @default(cuid())
+  purchaseId String
+  purchase   Purchase  @relation(fields: [purchaseId], references: [id])
+  productId  String
+  product    Product   @relation(fields: [productId], references: [id])
+  quantity   Decimal   @db.Decimal(14, 3)
+  unitPrice  Decimal   @db.Decimal(14, 2)
+  total      Decimal   @db.Decimal(14, 2)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  deletedAt  DateTime?
+  createdBy  String?
+  updatedBy  String?
+
+  @@index([purchaseId])
+  @@index([productId])
+  @@index([deletedAt])
+}
+
+model PurchaseBulletin {
+  id              String         @id @default(cuid())
+  reference       String         @unique
+  purchaseId      String?
+  purchase        Purchase?      @relation(fields: [purchaseId], references: [id])
+  supplierId      String
+  supplier        Supplier       @relation(fields: [supplierId], references: [id])
+  date            DateTime       @default(now())
+  status          BulletinStatus @default(DRAFT)
+  validatedAt     DateTime?
+  archivedPdfPath String?
+  // Champs bulletin papier KHENOUCHI (paramétrables via CompanySettings).
+  deliveredTo     String? // « Délivré à M … »
+  marque          String? // Marque (en-tête droite)
+  emballage       String? // Emb. (emballage)
+  consigne        String? // Consig. (consignation)
+  carrier         String?
+  notes           String?
+  totalWeight     Decimal        @default(0) @db.Decimal(14, 3) // somme des poids nets
+  totalAmount     Decimal        @default(0) @db.Decimal(14, 2) // somme des montants
+  paidAmount      Decimal        @default(0) @db.Decimal(14, 2) // déjà payé/déduit (B.4)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  deletedAt       DateTime?
+  createdBy       String?
+  updatedBy       String?
+
+  items PurchaseBulletinItem[]
+
+  stockLots StockLot[]
+
+  advanceAllocations SupplierAdvanceAllocation[]
+
+  @@index([purchaseId])
+  @@index([supplierId])
+  @@index([status])
+  @@index([deletedAt])
+}
+
+model PurchaseBulletinItem {
+  id            String           @id @default(cuid())
+  bulletinId    String
+  bulletin      PurchaseBulletin @relation(fields: [bulletinId], references: [id])
+  productId     String
+  product       Product          @relation(fields: [productId], references: [id])
+  marque        String? // origine / marque par ligne (الأصل)
+  nbrColis      Decimal          @default(0) @db.Decimal(14, 3) // N. colis / عدد السلع
+  poidsBrut     Decimal          @default(0) @db.Decimal(14, 3) // Brut / المحاسبه
+  tare          Decimal          @default(0) @db.Decimal(14, 3) // Tare / الناقص
+  poidsNet      Decimal          @default(0) @db.Decimal(14, 3) // Net / الصافي (calculé : brut - tare)
+  prixUnitaire  Decimal          @default(0) @db.Decimal(14, 2) // Prix unitaire / ثمن الوحدة
+  montant       Decimal          @default(0) @db.Decimal(14, 2) // Montant (DA) / المجموع (calculé : net * prix)
+  // Coûts & qualité par ligne (B.3 — pour coût réel lot & StockLot).
+  transportCost Decimal          @default(0) @db.Decimal(14, 2) // transport (DA)
+  fees          Decimal          @default(0) @db.Decimal(14, 2) // frais divers (DA)
+  remises       Decimal          @default(0) @db.Decimal(14, 2) // remises/rabais (DA)
+  origine       String? // origine (ex: Oued Smar)
+  qualite       String? // qualité (ex: 1ère)
+  calibre       String? // calibre (ex: 60-70)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  deletedAt     DateTime?
+  createdBy     String?
+  updatedBy     String?
+
+  @@index([bulletinId])
+  @@index([productId])
+  @@index([deletedAt])
+}
+
+model Arrival {
+  id         String         @id @default(cuid())
+  reference  String         @unique
+  purchaseId String
+  purchase   Purchase       @relation(fields: [purchaseId], references: [id])
+  date       DateTime       @default(now())
+  status     PurchaseStatus @default(RECEIVED)
+  notes      String?
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+  deletedAt  DateTime?
+  createdBy  String?
+  updatedBy  String?
+
+  stockLots StockLot[]
+
+  @@index([purchaseId])
+  @@index([deletedAt])
+}
+
+// ---------------------------------------------------------------------
+// STOCK
+// ---------------------------------------------------------------------
+
+model StockLot {
+  id                String            @id @default(cuid())
+  lotNumber         String            @unique
+  productId         String
+  product           Product           @relation(fields: [productId], references: [id])
+  supplierId        String
+  supplier          Supplier          @relation(fields: [supplierId], references: [id])
+  bulletinId        String?
+  bulletin          PurchaseBulletin? @relation(fields: [bulletinId], references: [id])
+  arrivalId         String?
+  arrival           Arrival?          @relation(fields: [arrivalId], references: [id])
+  quantity          Decimal           @db.Decimal(14, 3)
+  remainingQuantity Decimal           @db.Decimal(14, 3)
+  unitCost          Decimal           @db.Decimal(14, 2) // coût applicable par unité
+  purchasePrice     Decimal           @default(0) @db.Decimal(14, 2) // prix achat unitaire
+  realCost          Decimal           @default(0) @db.Decimal(14, 2) // coût réel lot (achat+transport+frais-remises)
+  arrivalDate       DateTime          @default(now())
+  unitSymbol        String?
+  grossWeight       Decimal           @default(0) @db.Decimal(14, 3)
+  tare              Decimal           @default(0) @db.Decimal(14, 3)
+  netWeight         Decimal           @default(0) @db.Decimal(14, 3)
+  origin            String?
+  quality           String?
+  caliber           String?
+  expiryDate        DateTime?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  deletedAt         DateTime?
+  createdBy         String?
+  updatedBy         String?
+
+  // Bordereau fournisseur auquel ce lot est rattaché (réception multi-calibres).
+  bordereauId String?
+
+  movements    StockMovement[]
+  losses       Loss[]
+  invoiceItems InvoiceItem[]   @relation("InvoiceItemLot")
+  saleItems    SaleItem[]      @relation("SaleItemLot")
+
+  @@index([productId])
+  @@index([supplierId])
+  @@index([bulletinId])
+  @@index([arrivalId])
+  @@index([bordereauId])
+  @@index([deletedAt])
+}
+
+model StockMovement {
+  id        String       @id @default(cuid())
+  productId String
+  product   Product      @relation(fields: [productId], references: [id])
+  lotId     String?
+  lot       StockLot?    @relation(fields: [lotId], references: [id])
+  type      MovementType
+  quantity  Decimal      @db.Decimal(14, 3)
+  reference String?
+  reason    String?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  deletedAt DateTime?
+  createdBy String?
+  updatedBy String?
+
+  @@index([productId])
+  @@index([lotId])
+  @@index([type])
+  @@index([deletedAt])
+}
+
+// ---------------------------------------------------------------------
+// VENTES / FACTURATION
+// ---------------------------------------------------------------------
+
+model Sale {
+  id         String     @id @default(cuid())
+  reference  String     @unique
+  customerId String?
+  customer   Customer?  @relation(fields: [customerId], references: [id])
+  supplierId String?
+  supplier   Supplier?  @relation(fields: [supplierId], references: [id])
+  date       DateTime   @default(now())
+  status     SaleStatus @default(DRAFT)
+  subtotal   Decimal    @default(0) @db.Decimal(14, 2)
+  total      Decimal    @default(0) @db.Decimal(14, 2)
+  notes      String?
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  deletedAt  DateTime?
+  createdBy  String?
+  updatedBy  String?
+
+  items    SaleItem[]
+  invoices Invoice[]
+  payments Payment[]
+
+  @@index([customerId])
+  @@index([supplierId])
+  @@index([date])
+  @@index([deletedAt])
+}
+
+model SaleItem {
+  id          String    @id @default(cuid())
+  saleId      String
+  sale        Sale      @relation(fields: [saleId], references: [id])
+  productId   String
+  product     Product   @relation(fields: [productId], references: [id])
+  quantity    Decimal   @db.Decimal(14, 3)
+  unitPrice   Decimal   @db.Decimal(14, 2)
+  total       Decimal   @db.Decimal(14, 2)
+  // Format bulletin de vente (grossiste) : colonnes Colis / Brut / Tare / Net.
+  colis       Decimal   @default(0) @db.Decimal(14, 3) // Nbre de colis / عدد الطرود
+  grossWeight Decimal   @default(0) @db.Decimal(14, 3) // Poids brut / الوزن القائم
+  tare        Decimal   @default(0) @db.Decimal(14, 3) // Tare / الطرح
+  netWeight   Decimal   @default(0) @db.Decimal(14, 3) // Poids net / الوزن الصافي (= quantité vendue)
+  lotId       String?
+  lot         StockLot? @relation("SaleItemLot", fields: [lotId], references: [id])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+  createdBy   String?
+  updatedBy   String?
+
+  @@index([saleId])
+  @@index([productId])
+  @@index([deletedAt])
+}
+
+model Invoice {
+  id              String        @id @default(cuid())
+  reference       String        @unique
+  ean13           String?       @unique // code-barres EAN13 (préfixe 2)
+  saleId          String?
+  sale            Sale?         @relation(fields: [saleId], references: [id])
+  customerId      String?
+  customer        Customer?     @relation(fields: [customerId], references: [id])
+  issueDate       DateTime      @default(now())
+  dueDate         DateTime?
+  status          InvoiceStatus @default(DRAFT)
+  subtotal        Decimal       @default(0) @db.Decimal(14, 2)
+  taxAmount       Decimal       @default(0) @db.Decimal(14, 2)
+  packingTotal    Decimal       @default(0) @db.Decimal(14, 2) // Σ(packingUnitPrice * colis) sur toutes les lignes
+  packingReturned Boolean       @default(false) // emballage rendu (consigne)
+  total           Decimal       @default(0) @db.Decimal(14, 2)
+  notes           String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  deletedAt       DateTime?
+  createdBy       String?
+  updatedBy       String?
+
+  items       InvoiceItem[]
+  creditNotes CreditNote[]
+  payments    Payment[]
+
+  @@index([saleId])
+  @@index([customerId])
+  @@index([status])
+  @@index([deletedAt])
+}
+
+model InvoiceItem {
+  id               String    @id @default(cuid())
+  invoiceId        String
+  invoice          Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  description      String // désignation (FR+AR si fourni)
+  productId        String? // lien optionnel vers Product
+  product          Product?  @relation(fields: [productId], references: [id])
+  quantity         Decimal   @db.Decimal(14, 3)
+  unitPrice        Decimal   @db.Decimal(14, 2)
+  total            Decimal   @db.Decimal(14, 2)
+  packingUnitPrice Decimal   @default(0) @db.Decimal(14, 2) // prix d'emballage par colis (saisi à la main)
+  // Format bulletin de vente (grossiste) : colonnes Colis / Brut / Tare / Net.
+  colis            Decimal   @default(0) @db.Decimal(14, 3) // Nbre de colis / عدد الطرود
+  grossWeight      Decimal   @default(0) @db.Decimal(14, 3) // Poids brut / الوزن القائم
+  tare             Decimal   @default(0) @db.Decimal(14, 3) // Tare / الطرح
+  netWeight        Decimal   @default(0) @db.Decimal(14, 3) // Poids net / الوزن الصافي
+  lotId            String?
+  lot              StockLot? @relation("InvoiceItemLot", fields: [lotId], references: [id])
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  deletedAt        DateTime?
+  createdBy        String?
+  updatedBy        String?
+
+  @@index([invoiceId])
+  @@index([productId])
+  @@index([deletedAt])
+}
+
+model CreditNote {
+  id         String        @id @default(cuid())
+  reference  String        @unique
+  invoiceId  String?
+  invoice    Invoice?      @relation(fields: [invoiceId], references: [id])
+  customerId String?
+  customer   Customer?     @relation(fields: [customerId], references: [id])
+  date       DateTime      @default(now())
+  amount     Decimal       @db.Decimal(14, 2)
+  reason     String?
+  status     InvoiceStatus @default(DRAFT)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+  deletedAt  DateTime?
+  createdBy  String?
+  updatedBy  String?
+
+  @@index([invoiceId])
+  @@index([customerId])
+  @@index([deletedAt])
+}
+
+model Payment {
+  id          String        @id @default(cuid())
+  reference   String        @unique
+  customerId  String?
+  customer    Customer?     @relation(fields: [customerId], references: [id])
+  supplierId  String?
+  supplier    Supplier?     @relation(fields: [supplierId], references: [id])
+  saleId      String?
+  sale        Sale?         @relation(fields: [saleId], references: [id])
+  invoiceId   String?
+  invoice     Invoice?      @relation(fields: [invoiceId], references: [id])
+  purchaseId  String?
+  purchase    Purchase?     @relation(fields: [purchaseId], references: [id])
+  amount      Decimal       @db.Decimal(14, 2)
+  method      PaymentMethod @default(CASH)
+  paymentDate DateTime      @default(now())
+  notes       String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  deletedAt   DateTime?
+  createdBy   String?
+  updatedBy   String?
+
+  @@index([customerId])
+  @@index([supplierId])
+  @@index([saleId])
+  @@index([invoiceId])
+  @@index([purchaseId])
+  @@index([deletedAt])
+}
+
+model Loss {
+  id        String    @id @default(cuid())
+  productId String?
+  product   Product?  @relation(fields: [productId], references: [id])
+  lotId     String?
+  lot       StockLot? @relation(fields: [lotId], references: [id])
+  quantity  Decimal   @db.Decimal(14, 3)
+  reason    String?
+  cost      Decimal   @db.Decimal(14, 2)
+  lossDate  DateTime  @default(now())
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+  createdBy String?
+  updatedBy String?
+
+  @@index([productId])
+  @@index([lotId])
+  @@index([deletedAt])
+}
+
+model PriceHistory {
+  id            String    @id @default(cuid())
+  productId     String
+  product       Product   @relation(fields: [productId], references: [id])
+  unitPrice     Decimal   @db.Decimal(14, 2)
+  oldPrice      Decimal?  @db.Decimal(14, 2)
+  newPrice      Decimal?  @db.Decimal(14, 2)
+  effectiveDate DateTime  @default(now())
+  reason        String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime?
+  createdBy     String?
+  updatedBy     String?
+
+  @@index([productId])
+  @@index([deletedAt])
+}
+
+// ---------------------------------------------------------------------
+// CONFIG / IMPRESSION / SAUVEGARDE
+// ---------------------------------------------------------------------
+
+model CompanySettings {
+  id               String   @id @default(cuid())
+  companyName      String
+  address          String?
+  phone            String?
+  email            String?
+  taxId            String? // RC / NIF
+  logoPath         String?
+  currency         String   @default("DA")
+  receiptFooter    String?
+  // --- Paramètres du bulletin d'achat bilingue (ex: KHENOUCHI) ---
+  // Mandataire (commissionnaire en fruits/légumes) — bloc gauche du bulletin.
+  mandataireNameAr String? // خنوسي شعبان
+  mandataireNameFr String? // KHENOUCI Chabane
+  activity         String? // Mandataire en Fruits et Légumes
+  market           String? // Marché de Gros - Eucalyptus
+  carreau          String? // 62
+  // Mentions légales du bas de bulletin (FR + AR).
+  mentionFr        String? // Après huit (8) jours, l'emballage ne sera pas remboursé
+  mentionAr        String? // النص العربي
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  createdBy        String?
+  updatedBy        String?
+}
+
+model PrintTemplate {
+  id        String       @id @default(cuid())
+  name      String       @unique
+  type      TemplateType
+  content   String // HTML / template
+  isDefault Boolean      @default(false)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  deletedAt DateTime?
+  createdBy String?
+  updatedBy String?
+
+  @@index([type])
+  @@index([deletedAt])
+}
+
+model Backup {
+  id         String       @id @default(cuid())
+  filename   String
+  path       String
+  size       Int?
+  type       BackupType   @default(MANUAL)
+  status     BackupStatus @default(PENDING)
+  startedAt  DateTime     @default(now())
+  finishedAt DateTime?
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+  createdBy  String?
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ---------------------------------------------------------------------
+// BON DE RÉCEPTION FOURNISSEUR (Étape 1 module Bordereau Fournisseur)
+// Règle métier : 1 bon de réception = 1 lot = 1 bordereau.
+// ---------------------------------------------------------------------
+
+model SupplierReception {
+  id                 String    @id @default(cuid())
+  reference          String    @unique // BR-000001
+  ean13              String?   @unique // code-barres EAN13 (préfixe 3)
+  date               DateTime  @default(now())
+  heure              String?
+  supplierId         String
+  productId          String
+  nbrColis           Decimal   @db.Decimal(14, 3)
+  poidsEmballageVide Decimal   @default(0) @db.Decimal(14, 3) // kg
+  avanceOui          Boolean   @default(false)
+  avanceMontant      Decimal   @default(0) @db.Decimal(14, 2)
+  droitMarche        Decimal   @default(0) @db.Decimal(14, 2) // frais droit de marché (DA) imputé au bordereau
+  transport          Decimal   @default(0) @db.Decimal(14, 2) // frais transport (DA) imputé au bordereau
+  observations       String?
+  bordereauId        String?
+  lotId              String?
+  createdBy          String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime?
+
+  @@index([supplierId])
+  @@index([productId])
+  @@index([deletedAt])
+}
+
+model SupplierBordereau {
+  id                    String    @id @default(cuid())
+  reference             String    @unique // BF-000001
+  ean13                 String?   @unique // code-barres EAN13 (préfixe 4)
+  supplierId            String
+  productId             String
+  receptionId           String
+  lotId                 String
+  calibre               String? // calibre optionnel (Option B : bordereau lié à fournisseur+produit+calibre)
+  colisRecus            Decimal   @db.Decimal(14, 3)
+  colisVendus           Decimal   @default(0) @db.Decimal(14, 3)
+  colisRestant          Decimal   @db.Decimal(14, 3)
+  poidsNetVendu         Decimal   @default(0) @db.Decimal(14, 3)
+  totalBrutVentes       Decimal   @default(0) @db.Decimal(14, 2)
+  commissionType        String    @default("pourcentage") // 'pourcentage' | 'fixe'
+  commissionValue       Decimal   @default(0) @db.Decimal(14, 2)
+  avancesAffectees      Decimal   @default(0) @db.Decimal(14, 2)
+  droitMarche           Decimal   @default(0) @db.Decimal(14, 2) // frais droit de marché (DA) imputé/déduit
+  transport             Decimal   @default(0) @db.Decimal(14, 2) // frais transport (DA) imputé/déduit
+  montantFinalDu        Decimal   @default(0) @db.Decimal(14, 2)
+  statut                String    @default("ouvert") // ouvert|pret_a_cloturer|cloture|partiellement_paye|paye|annule
+  dateOuverture         DateTime  @default(now())
+  dateCloture           DateTime?
+  clotureParUserId      String?
+  commissionDefinitive  Decimal?  @db.Decimal(14, 2)
+  avancesDefinitives    Decimal?  @db.Decimal(14, 2)
+  montantFinalDefinitif Decimal?  @db.Decimal(14, 2)
+  notes                 String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  deletedAt             DateTime?
+
+  @@index([supplierId])
+  @@index([productId])
+  @@index([deletedAt])
+}
+
+// Ligne calibre d'une réception multi-calibres (1 ligne = 1 lot).
+model SupplierReceptionItem {
+  id                 String    @id @default(cuid())
+  receptionId        String
+  calibre            String?
+  nbrColis           Decimal   @db.Decimal(14, 3)
+  poidsEmballageVide Decimal   @default(0) @db.Decimal(14, 3)
+  lotId              String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime?
+
+  @@index([receptionId])
+  @@index([lotId])
+}
+
+// Opération corrective sur bordereau clôturé (Étape 4)
+model SupplierBordereauCorrection {
+  id             String   @id @default(cuid())
+  bordereauId    String
+  userId         String
+  date           DateTime @default(now())
+  motif          String
+  champ          String?
+  ancienneValeur String
+  nouvelleValeur String
+  createdAt      DateTime @default(now())
+
+  @@index([bordereauId])
+}
+
+// =====================================================================
+// MODULE CAISSE (Temps 1) — journée de caisse, entrées/sorties, dépenses,
+// approvisionnements, remises, clôtures et journal d'audit.
+// Règle métier : l'argent est TOUJOURS en Decimal(14,2). Soft-delete via deletedAt
+// sur les entités de saisie. Les factures/paiements sont lus en LECTURE SEULE
+// (agrégés à la volée) et ne génèrent JAMAIS de CashRegisterEntry.
+// =====================================================================
+
+/// Une journée de caisse (1 ligne par date). Les champs de totaux sont des
+/// "miroirs" recalculés à chaque mutation pour la performance ; la source de
+/// vérité reste les modules Factures/Paiements + les CashRegisterEntry.
+model CashRegisterDay {
+  id                        String    @id @default(cuid())
+  date                      DateTime  @unique // la journée (minuit local)
+  openingCashFund           Decimal   @default(0) @db.Decimal(14, 2) // ancien fonds de caisse
+  invoiceTotal              Decimal   @default(0) @db.Decimal(14, 2) // total factures du jour
+  creditCollectionTotal     Decimal   @default(0) @db.Decimal(14, 2) // encaissements de crédits clients
+  cashSupplyTotal           Decimal   @default(0) @db.Decimal(14, 2) // approvisionnements caisse
+  totalEntries              Decimal   @default(0) @db.Decimal(14, 2) // total des entrées
+  creditInvoiceTotal        Decimal   @default(0) @db.Decimal(14, 2) // factures à crédit (non encaissées)
+  unpaidPartialInvoiceTotal Decimal   @default(0) @db.Decimal(14, 2) // reliquat des factures partiellement payées
+  expenseTotal              Decimal   @default(0) @db.Decimal(14, 2) // total dépenses
+  cashRemittanceTotal       Decimal   @default(0) @db.Decimal(14, 2) // total remises
+  closingCashFund           Decimal   @default(0) @db.Decimal(14, 2) // nouveau fonds de caisse
+  totalOutputs              Decimal   @default(0) @db.Decimal(14, 2) // total des sorties
+  difference                Decimal   @default(0) @db.Decimal(14, 2) // écart entrées - sorties
+  status                    String    @default("ouverte") // ouverte|à_vérifier|cloturee|reouverte
+  closedBy                  String?
+  closedAt                  DateTime?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+  deletedAt                 DateTime?
+
+  entries  CashRegisterEntry[]
+  closings CashRegisterClosing[]
+
+  @@index([deletedAt])
+  @@index([date])
+  @@index([status])
+}
+
+/// Ligne de caisse (entrée ou sortie). SEULES les saisies manuelles
+/// (dépense, approvisionnement, remise, fonds de clôture) créent une ligne.
+model CashRegisterEntry {
+  id                String          @id @default(cuid())
+  cashRegisterDayId String
+  day               CashRegisterDay @relation(fields: [cashRegisterDayId], references: [id])
+  direction         String // ENTRY|OUTPUT
+  category          String // libellé de catégorie (FR)
+  amount            Decimal         @db.Decimal(14, 2)
+  sourceType        String // INVOICE_TOTAL|CREDIT_COLLECTION|EXPENSE|CASH_SUPPLY|REMITTANCE|CLOSING_FUND|OPENING_FUND|OTHER_ENTRY|OTHER_OUTPUT
+  sourceId          String?
+  reference         String?
+  description       String?
+  createdBy         String?
+  createdAt         DateTime        @default(now())
+  deletedAt         DateTime?
+
+  @@unique([sourceType, sourceId]) // anti-doublon strict
+  @@index([cashRegisterDayId])
+  @@index([deletedAt])
+  @@index([direction])
+}
+
+/// Dépense de caisse. Annulation = status 'annulee' + ligne de caisse inverse
+/// (jamais de suppression physique).
+model Expense {
+  id            String        @id @default(cuid())
+  date          DateTime
+  heure         String?
+  motif         String
+  category      String?
+  amount        Decimal       @db.Decimal(14, 2)
+  paymentMethod PaymentMethod @default(CASH)
+  observation   String?
+  justificatif  String?
+  userId        String?
+  status        String        @default("validee") // validee|annulee
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  deletedAt     DateTime?
+
+  @@index([date])
+  @@index([status])
+  @@index([deletedAt])
+}
+
+/// Approvisionnement de la caisse (entrée d'argent hors ventes).
+model CashSupply {
+  id           String    @id @default(cuid())
+  reference    String    @unique
+  date         DateTime
+  heure        String?
+  amount       Decimal   @db.Decimal(14, 2)
+  motif        String
+  mode         String
+  userId       String?
+  observation  String?
+  justificatif String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  @@index([date])
+  @@index([deletedAt])
+}
+
+/// Remise d'espèces (sortie de caisse vers banque/direction).
+model CashRemittance {
+  id           String    @id @default(cuid())
+  reference    String    @unique
+  date         DateTime
+  heure        String?
+  amount       Decimal   @db.Decimal(14, 2)
+  beneficiary  String?
+  motif        String
+  userId       String?
+  observation  String?
+  justificatif String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  @@index([date])
+  @@index([deletedAt])
+}
+
+/// Instantané figé d'une clôture de journée (traçabilité comptable).
+model CashRegisterClosing {
+  id                 String          @id @default(cuid())
+  cashRegisterDayId  String
+  day                CashRegisterDay @relation(fields: [cashRegisterDayId], references: [id])
+  closedBy           String?
+  closedAt           DateTime        @default(now())
+  ancienFonds        Decimal         @db.Decimal(14, 2)
+  facturesTotal      Decimal         @db.Decimal(14, 2)
+  encaissementsTotal Decimal         @db.Decimal(14, 2)
+  approTotal         Decimal         @db.Decimal(14, 2)
+  depensesTotal      Decimal         @db.Decimal(14, 2)
+  creditsCreesTotal  Decimal         @db.Decimal(14, 2)
+  nonEncaisseTotal   Decimal         @db.Decimal(14, 2)
+  remisesTotal       Decimal         @db.Decimal(14, 2)
+  nouveauFonds       Decimal         @db.Decimal(14, 2)
+  totalEntrees       Decimal         @db.Decimal(14, 2)
+  totalSorties       Decimal         @db.Decimal(14, 2)
+  difference         Decimal         @db.Decimal(14, 2)
+  createdAt          DateTime        @default(now())
+
+  @@index([cashRegisterDayId])
+}
+
+/// Journal d'audit spécifique au module caisse.
+model CashRegisterAuditLog {
+  id                String   @id @default(cuid())
+  cashRegisterDayId String?
+  action            String // creation|modification|annulation|cloture|reouverture|correction|changement_fonds
+  userId            String?
+  details           Json?
+  createdAt         DateTime @default(now())
+
+  @@index([cashRegisterDayId])
+  @@index([action])
+}

@@ -1,0 +1,98 @@
+# PLAN Fruiterie ERP — suivi du projet
+
+**Dernière mise à jour** : 01/08/2026
+**Emplacement** : /home/mimo/fruiterie-app
+**Serveur** : http://localhost:8080 (backend Node/Express/Prisma + frontend buildé servi en dist)
+**DB** : PostgreSQL local
+**Comptes** : admin/admin123 · responsable/resp123 · employe/emp123
+**RÈGLE CRITIQUE** : aucun repo git initialisé (≈16 livraisons non committées) — fragilité maximale, à figer en urgence.
+
+---
+
+## 1. État réel
+
+### Phases terminées (avant le 01/08)
+- **Phase A** — Fondations (auth JWT, Prisma, CRUD de base). ✅
+- **Phase B** — Bordereaux fournisseur + réceptions + lots. ✅
+- **Phase C** — Ventes/Factures/Paiements/Bulletin + correctifs. ✅
+- Frais réception → bordereau (droitMarche/transport), page détail réception, avance champ direct, PDF réception avec frais. ✅ (25/07)
+
+### Session du 01/08 — LIVRAISONS (toutes vérifiées en vrai par le chef)
+1. **Bug réception/stock corrigé** — PATCH réception écrasait `remainingQuantity` du lot (= newColis au lieu de restant) et figeait le statut du bordereau. Corrigé : `remainingQuantity = restant` (newColis − vendus − pertes), statut recalculé dynamiquement (`vendus >= recus ? pret_a_cloturer : ouvert`). Preuve curl : 200→250 colis → colisRestant=50, statut=ouvert.
+2. **MODULE CAISSE (Temps 1) — livré complet** :
+   - 7 modèles Prisma (CashRegisterDay, CashRegisterEntry, Expense, CashSupply, CashRemittance, CashRegisterClosing, CashRegisterAuditLog) + migration.
+   - API REST : jours liste/détail, dépense/appro/remise (créent auto les lignes caisse + recalcul), clôture (crée jour suivant avec openingCashFund = closingCashFund), annulation dépense (ligne inverse, pas de suppression), PDF A5 bordereau.
+   - Calculs §15/§16 à la volée depuis Invoice/Payment (invoiceTotal, creditCollectionTotal, creditInvoiceTotal, encaissementReelVentes). Anti-doublon (sourceType+sourceId). Garde : saisie refusée si jour clôturé.
+   - Front : /caisse (vue 4 colonnes + cartes mobile), /caisse/:date (entrées/sorties), /depenses, /depenses/nouvelle, /caisse/approvisionnement, /caisse/remise, /caisse/cloture.
+   - **Correction calcul « Ventes à crédit »** (fin de session) : `creditInvoiceTotal` = MONTANT TOTAL de chaque facture non payée du jour (SENT/PARTIALLY_PAID/OVERDUE), PAS le reste dû. `creditCollectionTotal` = paiements clients sur factures du jour. `unpaidPartialInvoiceTotal` (reste dû) calculé séparément et EXCLU de totalOutputs (pas de double comptage). Preuve runtime : facture PARTIALLY_PAID 10000 → creditInvoiceTotal=10000 (pas 7000).
+3. **Impression bordereau de caisse A5** — `backend/src/caisse/pdf.ts` (`buildBordereauCaissePdf`), endpoint `GET /api/cash-register/days/:date/pdf`, bouton « Imprimer A5 » sur CaisseDayDetail + CloturePage. PDF valide 1 page vérifié.
+4. **Code-barres CODE128 + EAN13 → EAN13 seul** :
+   - Champ `ean13` (String @unique, préfixe 2=Facture/3=Réception/4=Bordereau) + 11 chiffres séquence + checksum, sur Invoice/SupplierReception/SupplierBordereau. Backfill one-shot idempotent (`prisma/backfill-ean13.ts`) remplit les 41 docs existants.
+   - `bwip-js` génère PNG EAN13. Double code-barres d'abord (CODE128 réf + EAN13), puis **EAN13 SEUL** (retiré CODE128 sur demande client).
+   - **Placement final** : EAN13 centré EN EN-TÊTE, AU-DESSUS de la ligne de séparation, avant le titre (vérifié visuellement via vision sur PDF réception : « En-tête → Code-barres → Ligne → Titre »). 3 PDF : facture, réception, bordereau.
+   - Endpoint `GET /api/search?q=<ean13 ou texte>` : EAN13 → redirige vers le doc (par préfixe), texte → liste (réf / nom client / fournisseur). Barres de recherche existantes de /receptions, /bordereaux, /ventes étendues pour accepter un EAN13 scanné (lecteur USB = saisie clavier). Hook `useBarcodeSearch`.
+5. **Édition COMPLÈTE réception** (bouton Modifier) :
+   - Backend PATCH étendu : `items[]` (calibres + nbrColis + poids), `droitMarche`, `transport`, `avanceMontant` — recalcul bordereau en Σ COMPLET (pas de delta, bordereau partagé N réceptions) en préservant `colisVendus`. Lots reconciliés (lot principal ajusté, lignes supplémentaires → nouveaux lots).
+   - Front : modal d'édition complet type ReceptionNew (lignes calibre + avance + frais), lecture seule fournisseur/produit.
+   - ⚠️ Client a ASSUMÉ le risque : édition complète autorisée même après vente.
+6. **Navigation caisse cliquable** : Stats de CaisseDayDetail deviennent des liens → 5 pages liste filtrées par date (/caisse/:date/factures, /credits-encaisses, /depenses, /credits-crees, /remises). 5 endpoints backend + 5 fonctions api.ts + 5 routes App.tsx. Tous HTTP 200 vérifiés.
+
+### Règle de travail Fruiterie (validée par Mimo)
+- **Le chef (Hermes) ne code PAS directement** → tout code délégué à des agents (subagents), y compris correctifs.
+- **Brainstorm OBLIGATOIRE avant le code** : clarifier la sémantique métier (avance, crédit, recalcul bordereau).
+- **Vérification du chef OBLIGATOIRE** : rapports agents = auto-déclarations. Le chef revérifie par grep terminal réel + curl + extraction PDF + vision sur PNG. **L'outil `search_files` donne des FAUX NÉGATIFS** (ex: `droitMarche`, `ean13`, `cash-register`) — TOUJOURS confirmer avec `grep` terminal ou `read_file`.
+- Nettoyage données de test (soft-delete) après preuve.
+
+---
+
+## 2. Roadmap restante
+
+### Priorité immédiate
+- [ ] **`git init` + commit** de l'état actuel (≈16 livraisons) — URGENT, aucun repo.
+- [ ] **Validation visuelle navigateur** réelle (capture) des pages caisse, édition réception, PDF, scan EAN13.
+- [ ] **Temps 2 Caisse** : export Excel, réouverture autorisée d'un jour clôturé, correction du fonds d'ouverture, i18n AR sur pages caisse.
+- [ ] **Phase D** : i18n FR/AR complet (toutes pages, RTL).
+- [ ] **Phase E** : audit QA multi-experts en lecture seule + corrections.
+- [ ] **Phase F** : packaging Tauri (.exe) + cloud + HTTPS.
+
+### Correctifs / suivi
+- [ ] Tests de non-régression flux Supprimer (soft-delete vente + facture).
+- [ ] Cohérence recalcul Net en édition (Brut−Tare) avec total facture.
+- [ ] Vérifier que le POST réception rattache bien au bon bordereau (il réutilise un bordereau existant ouvert au lieu d'en créer un nouveau — à confirmer avec Mimo).
+
+---
+
+## 3. Commandes (rappel)
+```bash
+# Backend
+cd /home/mimo/fruiterie-app/backend && npm run build
+pkill -f "dist/src/index.js"; sleep 2; node dist/src/index.js
+curl -s http://localhost:8080/api/health
+
+# Frontend
+cd /home/mimo/fruiterie-app/frontend && npm run build
+
+# Backfill EAN13 (one-shot idempotent)
+cd /home/mimo/fruiterie-app/backend && node prisma/backfill-ean13.ts
+```
+
+## 4. Arborescence clés (modifiés le 01/08)
+```
+backend/src/
+  routes/cash-register.routes.ts     # module Caisse + search + endpoints drill-down par date
+  routes/supplier-receptions.routes.ts  # PATCH édition complète + recalcul Σ bordereau
+  routes/search.routes.ts            # /api/search (EAN13 + texte)
+  caisse/pdf.ts                      # buildBordereauCaissePdf (A5)
+  barcode.ts                         # EAN13 (bwip-js) + buildEan13Only + drawBarcodeFooter
+  receptions/pdf.ts  bordereaux/pdf.ts  invoices/pdf.ts  # EAN13 en en-tête
+  prisma/schema.prisma              # +7 modèles Caisse + ean13 (3 modèles)
+  prisma/backfill-ean13.ts
+frontend/src/
+  pages/CaissePage.tsx  CaisseDayDetail.tsx  DepensesPage.tsx  ExpenseNew.tsx
+  pages/CashSupplyPage.tsx  CashRemittancePage.tsx  CloturePage.tsx
+  pages/CaisseInvoices.tsx  CaisseCreditCollections.tsx  CaisseExpenses.tsx
+  pages/CaisseCreditSales.tsx  CaisseRemittances.tsx
+  pages/Receptions.tsx              # modal édition complète
+  hooks/useBarcodeSearch.ts
+  api.ts  App.tsx
+```
