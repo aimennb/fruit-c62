@@ -580,6 +580,11 @@ router.patch('/:id', requirePermission('INVOICE_WRITE'), async (req, res) => {
       if (!inv || inv.deletedAt) {
         const e: any = new Error('Facture introuvable'); e.code = 'NOT_FOUND'; throw e;
       }
+      // VERROU FACTURE PAYÉE : une facture soldée (restant = 0) n'est plus
+      // modifiable (ni édition de ligne, ni ajout d'article).
+      if (inv.status === 'PAID') {
+        const e: any = new Error('Facture payée — verrouillée'); e.code = 'LOCKED'; throw e;
+      }
       const data: any = {};
       if (issueDate) data.issueDate = new Date(issueDate);
       if (notes !== undefined) data.notes = notes;
@@ -661,6 +666,7 @@ router.patch('/:id', requirePermission('INVOICE_WRITE'), async (req, res) => {
     res.json(serializeInvoice(result as any));
   } catch (e: any) {
     if (e.code === 'NOT_FOUND') return res.status(404).json({ error: 'Facture introuvable' });
+    if (e.code === 'LOCKED') return res.status(400).json({ error: 'Facture payée — verrouillée' });
     console.error('[invoices] patch error', e);
     res.status(500).json({ error: 'Erreur modification facture' });
   }

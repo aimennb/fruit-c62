@@ -114,7 +114,7 @@ export function buildBordereauCaissePdf(r: BordereauCaissePdfDTO): PDFKit.PDFDoc
   // Libellés exacts du bordereau papier.
   const entrees: [string, string, boolean][] = [
     ['LES VENTES', fmtDA(r.encaissementReelVentes), false],
-    ['ENC. CREDITS', fmtDA(r.creditCollectionTotal), false],
+    ['TOUTES LES FACTURES', fmtDA(r.creditCollectionTotal), false],
     ['ENCIEN F.CAISSE', fmtDA(r.openingCashFund), false],
     ['APPRO CAISSE', fmtDA(r.cashSupplyTotal), false],
     ['CONSIGNATION', fmtDA(r.consignation ?? 0), false],

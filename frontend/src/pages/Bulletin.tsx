@@ -82,26 +82,25 @@ export default function Bulletin() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
-  // Search & status filter (client-side)
+  // Recherche serveur (?q=) + pagination serveur (20/page)
   const [search, setSearch] = useState('')
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const TAKE = 20
+  const totalPages = Math.max(1, Math.ceil(total / TAKE))
   // Scanner code-barres USB : EAN13 saisi dans la barre → redirection facture.
   useBarcodeSearch(search, { onNotFound: (m) => setError(m) })
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'PAID' | 'UNPAID'>('ALL')
 
+  // Filtre statut appliqué côté client sur la page courante uniquement.
   const filtered = sales.filter((s) => {
     const inv = invoiceBySaleId(s.id)
-    const q = search.trim().toLowerCase()
-    const matchSearch =
-      !q ||
-      s.reference.toLowerCase().includes(q) ||
-      (s.customer?.name ?? '').toLowerCase().includes(q) ||
-      invoiceStatusBadge(inv ? inv.status : 'DRAFT').label.toLowerCase().includes(q)
     const isPaid = inv?.status === 'PAID' || Number(inv?.remaining ?? 0) === 0
-    const matchStatus =
+    return (
       statusFilter === 'ALL' ||
       (statusFilter === 'PAID' && isPaid) ||
       (statusFilter === 'UNPAID' && !isPaid)
-    return matchSearch && matchStatus
+    )
   })
 
   // Encash modal
@@ -122,10 +121,20 @@ export default function Bulletin() {
   const [detailEdit, setDetailEdit] = useState(false)
   const [detailSaving, setDetailSaving] = useState(false)
 
-  async function load() {
+  async function load(q = search, p = page) {
     try {
-      const [s, inv, c] = await Promise.all([getSales(), getInvoices(), getCustomers()])
-      setSales(Array.isArray(s) ? s : s.items)
+      const [s, inv, c] = await Promise.all([
+        getSales(q, p, TAKE),
+        getInvoices(200),
+        getCustomers(),
+      ])
+      if (Array.isArray(s)) {
+        setSales(s)
+        setTotal(s.length)
+      } else {
+        setSales(s.items)
+        setTotal(Number(s.total ?? s.items.length))
+      }
       setInvoices(Array.isArray(inv) ? inv : inv.items)
       setCustomers(c.items)
     } catch (e) {
@@ -135,9 +144,21 @@ export default function Bulletin() {
     }
   }
 
+  // Recherche serveur avec debounce 300ms : toute frappe revient en page 1.
   useEffect(() => {
-    void load()
-  }, [])
+    const t = setTimeout(() => {
+      setPage(1)
+      void load(search, 1)
+    }, 300)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search])
+
+  function goToPage(p: number) {
+    if (p < 1 || p > totalPages) return
+    setPage(p)
+    void load(search, p)
+  }
 
   function invoiceBySaleId(saleId?: string | null) {
     if (!saleId) return null
@@ -399,6 +420,26 @@ export default function Bulletin() {
         </Table>
       )}
 
+      {/* Pagination serveur : 20 / page */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="text-sm text-gray-600">
+          {lang === 'ar'
+            ? `${total} نتيجة · صفحة ${page} / ${totalPages}`
+            : `${total} résultat${total > 1 ? 's' : ''} · Page ${page} / ${totalPages}`}
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="secondary" disabled={page <= 1} onClick={() => goToPage(page - 1)}>
+            {lang === 'ar' ? 'السابق' : 'Précédent'}
+          </Button>
+          <Button
+            variant="secondary"
+            disabled={page * TAKE >= total}
+            onClick={() => goToPage(page + 1)}
+          >
+            {lang === 'ar' ? 'التالي' : 'Suivant'}
+          </Button>
+        </div>
+      </div>
 
       {/* Encash modal */}
       <Modal

@@ -590,21 +590,34 @@ export default function SaleNew() {
 
       {createdSaleId ? (
         <div className="rounded-xl bg-green-50 border border-green-200 px-4 py-4 space-y-3">
-          <div className="text-sm font-semibold text-green-800">
-            {lang === 'ar' ? 'تم إنشاء المحرر. كيف تريد التحصيل؟' : 'Bulletin créé. Comment encaisser ?'}
+          {/* RÈGLE 1 : après « Créer », la facture est en BROUILLON (DRAFT).
+              Aucun statut Crédit n'est appliqué par défaut : c'est le choix de
+              règlement ci-dessous qui fixe PAYÉ / AVANCE / CRÉDIT. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-green-800">
+              {lang === 'ar' ? 'تم إنشاء المحرر.' : 'Bulletin créé.'}
+            </span>
+            <span className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-semibold text-gray-700">
+              {lang === 'ar' ? 'مسودة' : 'Brouillon'}
+            </span>
+          </div>
+          <div className="text-sm text-gray-700">
+            {lang === 'ar'
+              ? 'الفاتورة في حالة «مسودة» بانتظار التسوية. اختر طريقة التحصيل لتحديد الحالة النهائية.'
+              : 'La facture reste en Brouillon, en attente de règlement. Choisissez le mode d’encaissement pour fixer son statut définitif.'}
           </div>
           <div className="flex flex-wrap gap-2">
             <Button variant="primary" onClick={() => quickPay('PAID')}>
-              {lang === 'ar' ? 'مدفوع' : 'Payé'}
+              {lang === 'ar' ? 'دفع كامل (مدفوع)' : 'Encaisser total → Payé'}
             </Button>
             <Button variant="secondary" onClick={() => quickPay('PARTIAL')}>
-              {lang === 'ar' ? 'دفعة مؤجلة' : 'Paiement différé'}
+              {lang === 'ar' ? 'دفعة جزئية' : 'Avance (paiement partiel)'}
             </Button>
             <Button variant="ghost" onClick={() => quickPay('CREDIT')}>
-              {lang === 'ar' ? 'دائن' : 'Crédit'}
+              {lang === 'ar' ? 'بيع بالدين (دائن)' : 'Vendre à crédit → Crédit'}
             </Button>
             <Button variant="ghost" onClick={() => navigate('/ventes')}>
-              {lang === 'ar' ? 'تم' : 'Terminé'}
+              {lang === 'ar' ? 'لاحقًا (يبقى مسودة)' : 'Plus tard (reste Brouillon)'}
             </Button>
           </div>
         </div>

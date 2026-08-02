@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { getInvoice, openInvoicePdf, updateInvoice } from '../api'
+import {
+  getInvoice,
+  openInvoicePdf,
+  updateInvoice,
+  getProductSearch,
+  type ProductSearchItem,
+} from '../api'
 import type { Invoice } from '../types'
 import {
   PageHeader,
@@ -10,6 +16,8 @@ import {
   Input,
   Field,
   Badge,
+  SearchSelect,
+  type SearchSelectOption,
 } from '../components/ui'
 import { useLang } from '../i18n'
 
@@ -40,6 +48,62 @@ function invoiceStatusBadge(
     default:
       return { label: 'Brouillon', color: 'gray' }
   }
+}
+
+// ---------------------------------------------------------------------
+// Sélecteur produit pour une NOUVELLE ligne ajoutée en mode édition
+// (même saisie que « Nouvelle vente » : autocomplete produit FR/AR).
+// ---------------------------------------------------------------------
+function ProductPicker({
+  value,
+  onPick,
+}: {
+  value: string
+  onPick: (p: { id: string; label: string }) => void
+}) {
+  const { lang } = useLang()
+  const [options, setOptions] = useState<SearchSelectOption[]>([])
+  const [loading, setLoading] = useState(false)
+  const [text, setText] = useState(value)
+
+  async function query(q: string) {
+    setLoading(true)
+    try {
+      const r = await getProductSearch(q)
+      setOptions(
+        (r.items ?? []).map((p: ProductSearchItem) => ({
+          id: p.id,
+          label: lang === 'ar' ? p.nameAr || p.name : p.name,
+        })),
+      )
+    } catch {
+      setOptions([])
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <SearchSelect
+      placeholder={lang === 'ar' ? 'ابحث عن منتج…' : 'Rechercher produit…'}
+      value={text}
+      options={options}
+      loading={loading}
+      onQuery={query}
+      onChange={(t) => {
+        setText(t)
+        onPick({ id: '', label: t })
+      }}
+      onSelect={(o) => {
+        setText(o.label)
+        onPick({ id: o.id, label: o.label })
+      }}
+      onClear={() => {
+        setText('')
+        onPick({ id: '', label: '' })
+      }}
+    />
+  )
 }
 
 const fmtDate = (d?: string | null) => {
@@ -78,7 +142,16 @@ export default function InvoiceDetail() {
     setSaving(true)
     setError('')
     try {
-      const items = (invoice.items ?? []).map((it: any) => ({
+      // On renvoie TOUTES les lignes (existantes + nouvelles) car le backend
+      // fait un REPLACE des lignes. Les lignes vides (ajout non renseigné)
+      // sont ignorées.
+      const items = (invoice.items ?? [])
+        .filter(
+          (it: any) =>
+            (it.productId || (it.description ?? '').trim()) &&
+            Number(it.unitPrice ?? 0) > 0,
+        )
+        .map((it: any) => ({
         description: (it as any).description ?? '',
         productId: (it as any).productId ?? undefined,
         quantity: Number((it as any).quantity ?? 0),
@@ -113,6 +186,34 @@ export default function InvoiceDetail() {
     }
   }
 
+  // RÈGLE 2 (c) : facture soldée (restant = 0 ou statut PAID) = VERROUILLÉE.
+  const isLocked =
+    !!invoice &&
+    (invoice.status === 'PAID' ||
+      Number(invoice.remaining ?? invoice.total ?? 0) <= 0)
+
+  // RÈGLE 2 (a) : ajout d'une NOUVELLE ligne au tableau d'édition.
+  function addItem() {
+    if (!invoice) return
+    const items = [
+      ...((invoice.items ?? []) as any[]),
+      {
+        id: undefined,
+        _new: true,
+        description: '',
+        productId: undefined,
+        quantity: 0,
+        unitPrice: '',
+        packingUnitPrice: '',
+        colis: '',
+        grossWeight: '',
+        tare: '',
+        netWeight: '',
+      },
+    ]
+    setInvoice({ ...invoice, items } as Invoice)
+  }
+
   return (
     <div className="space-y-5">
       <PageHeader
@@ -127,7 +228,14 @@ export default function InvoiceDetail() {
               <Button
                 variant="secondary"
                 onClick={() => setEdit(true)}
-                disabled={!invoice}
+                disabled={!invoice || isLocked}
+                title={
+                  isLocked
+                    ? lang === 'ar'
+                      ? 'فاتورة مدفوعة — مقفلة'
+                      : 'Facture payée — verrouillée'
+                    : undefined
+                }
               >
                 {lang === 'ar' ? 'تعديل' : 'Modifier'}
               </Button>
@@ -182,14 +290,26 @@ export default function InvoiceDetail() {
                 {(invoice.items ?? []).map((it: any, i: number) => (
                   <div key={it.id ?? i} className="grid grid-cols-7 gap-2 items-end">
                     <Field label={lang === 'ar' ? 'المنتج' : 'Produit'}>
-                      <Input
-                        value={it.description ?? it.product?.name ?? ''}
-                        onChange={(e) => {
-                          const items = [...(invoice.items ?? [])]
-                          ;(items[i] as any).description = e.target.value
-                          setInvoice({ ...invoice, items })
-                        }}
-                      />
+                      {it._new ? (
+                        <ProductPicker
+                          value={it.description ?? ''}
+                          onPick={(p) => {
+                            const items = [...(invoice.items ?? [])]
+                            ;(items[i] as any).productId = p.id || undefined
+                            ;(items[i] as any).description = p.label
+                            setInvoice({ ...invoice, items })
+                          }}
+                        />
+                      ) : (
+                        <Input
+                          value={it.description ?? it.product?.name ?? ''}
+                          onChange={(e) => {
+                            const items = [...(invoice.items ?? [])]
+                            ;(items[i] as any).description = e.target.value
+                            setInvoice({ ...invoice, items })
+                          }}
+                        />
+                      )}
                     </Field>
                     <Field label={lang === 'ar' ? 'العبوات' : 'Colis'}>
                       <Input
@@ -274,6 +394,12 @@ export default function InvoiceDetail() {
                     </Field>
                   </div>
                 ))}
+                <div className="pt-2">
+                  {/* RÈGLE 2 (a) : ajout d'article (pas de suppression de ligne). */}
+                  <Button type="button" variant="secondary" onClick={addItem}>
+                    {lang === 'ar' ? '+ إضافة مادة' : '+ Ajouter un article'}
+                  </Button>
+                </div>
                 <div className="flex justify-end gap-2 pt-3 border-t border-gray-100">
                   <Button
                     type="button"
@@ -394,15 +520,22 @@ export default function InvoiceDetail() {
               rows.forEach((r, i) => {
                 r.isRecent = i === 0
               })
-              // Ligne facture en bas (non cliquable)
+              // Ligne facture en bas (non cliquable) — statut RÉEL de la facture,
+              // pas un libellé en dur. DRAFT -> Brouillon, PAID -> Payé, SENT+restant
+              // total -> Crédit, etc. (voir invoiceStatusBadge plus haut).
+              const invBadge = invoiceStatusBadge(
+                invoice.status,
+                (invoice as any).remaining ?? total,
+                total,
+              )
               rows.push({
                 key: 'inv',
                 ref: invoice.reference,
                 date: (invoice.issueDate ?? invoice.createdAt) as string | null,
                 avance: 0,
                 reste: total,
-                statusLabel: lang === 'ar' ? 'دين' : 'Crédit',
-                statusColor: 'blue',
+                statusLabel: invBadge.label,
+                statusColor: invBadge.color,
                 isRecent: rows.length === 0,
               })
               return (

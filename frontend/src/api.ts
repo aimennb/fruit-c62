@@ -354,8 +354,16 @@ export function allocateAdvance(id: string, data: { purchaseBulletinId: string; 
 }
 
 // ---- Sales (Phase C) ----
-export function getSales() {
-  return request<Sale[] | { items: Sale[]; total: number }>('/api/sales')
+// Recherche + pagination côté serveur (?q=, ?page=, ?take=)
+export function getSales(q?: string, page?: number, take?: number) {
+  const params = new URLSearchParams()
+  if (q && q.trim()) params.set('q', q.trim())
+  if (page && page > 0) params.set('page', String(page))
+  if (take && take > 0) params.set('take', String(take))
+  const qs = params.toString()
+  return request<Sale[] | { items: Sale[]; total: number; page?: number; take?: number }>(
+    `/api/sales${qs ? `?${qs}` : ''}`,
+  )
 }
 export function getSale(id: string) {
   return request<Sale>(`/api/sales/${id}`)
@@ -388,8 +396,9 @@ export function confirmSale(id: string) {
 }
 
 // ---- Invoices (Phase C) ----
-export function getInvoices() {
-  return request<Invoice[] | { items: Invoice[]; total: number }>('/api/invoices')
+export function getInvoices(take?: number) {
+  const qs = take && take > 0 ? `?take=${take}` : ''
+  return request<Invoice[] | { items: Invoice[]; total: number }>(`/api/invoices${qs}`)
 }
 export function createInvoice(data: {
   saleId?: string | null

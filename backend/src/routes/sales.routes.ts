@@ -311,6 +311,7 @@ router.get('/', requirePermission('SALE_READ'), async (req: Request, res: Respon
           OR: [
             { reference: { contains: q } },
             { customer: { name: { contains: q } } },
+            { invoices: { some: { reference: { contains: q }, deletedAt: null } } },
           ],
         }
       : {}),
