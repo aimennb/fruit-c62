@@ -79,12 +79,20 @@
 - **Nettoyage** : toutes les données de test soft-deletées (BP actifs = 0).
 - **Commit** `git` OK (17 fichiers). **PUSH en attente** : PAT GitHub révoqué, pas de SSH → à refaire un PAT ou configurer SSH pour push `origin main` (`aimennb/fruit-c62`).
 
+### Session du 02/08 (suite matin) — PERMISSIONS GRANULAIRES + USER RÉCEPTIONNAIRE
+- **Modèle `UserPermission`** (override GRANT/DENY par user au-dessus du rôle) + `auth/permissions.ts` (`getUserPermissions`/`getUserPermissionsDetail` = rôle − DENY + GRANT).
+- `/me` et `requirePermission` résolus sur permissions EFFECTIVES. Régression zéro pour les autres comptes (user sans override = perms de son rôle).
+- **Frontend** : menu sidebar + bottom-nav filtrés par permission (`NAV_PERM`), login recharge toujours `/me`, redirect réceptionnaire (sans SALE_READ) → `/receptions`.
+- **User `receptionnaire`** créé (role EMPLOYE, mdp `Reception123`) + verrouillé via `prisma/lock-receptionnaire.ts` : 29 DENY, seul `RECEPTION_WRITE` conservé. Scripts `scripts/seed-reception-write.js` (upsert perm + RolePermission EMPLOYE/ADMIN) et `scripts/create-receptionnaire.js`.
+- **Règle « 1 bordereau = 1 seul BP »** : `eligible/:supplierId` exclut tout bordereau déjà présent dans une ligne de BP (réglé ou non). `SupplierPaymentLine.montantDuAvant` (dû figé création) + `montantPaye` (cumul réel des versements) ajoutés + peuplés par `POST /:id/pay` + exposés dans `GET /:id` et PDF.
+- Builds backend+frontend 0 erreur. DB push OK (UserPermission + champs ligne). **Vérif runtime** : receptionnaire → `/me` renvoie `['RECEPTION_WRITE']` uniquement ; `/api/suppliers` → 403 ; `/api/supplier-receptions` GET 200 / POST 400 (validation) ; admin `/api/suppliers` → 200. Commit `f0541d2`.
+
 ### Priorité immédiate
 - [x] `git init` + commit + repo GitHub (`aimennb/fruit-c62`).
 - [x] Fix bug caisse credits-crees.
 - [x] Nettoyage DB + re-seed.
 - [x] **Module Paiement Fournisseur** (brainstorm + livraison + vérif chef + commit). PUSH GitHub en attente (PAT révoqué).
-- [ ] **PUSH GitHub** du module Paiement Fournisseur (nécessite nouveau PAT ou SSH).
+- [ ] **PUSH GitHub** (tous les commits depuis `b70ea5c` sont LOCAUX, pas poussés) — nécessite nouveau PAT ou SSH (`aimennb/fruit-c62`).
 - [ ] **Validation visuelle navigateur** complète (re-capture caisse/édition réception/scan EAN13 des livraisons 01/08 matin).
 - [ ] **Temps 2 Caisse** : export Excel, réouverture autorisée d'un jour clôturé (endpoint absent pour l'instant — le garde bloque les saisies sur jour clôturé), correction du fonds d'ouverture, i18n AR sur pages caisse.
 - [ ] **Phase D** : i18n FR/AR complet (toutes pages, RTL).
