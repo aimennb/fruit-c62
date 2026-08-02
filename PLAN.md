@@ -1,6 +1,6 @@
 # PLAN Fruiterie ERP — suivi du projet
 
-**Dernière mise à jour** : 01/08/2026 (session 2 — module Paiement Fournisseur)
+**Dernière mise à jour** : 02/08/2026 (session 3 — restructuration Paiement Fournisseur)
 **Emplacement** : /home/mimo/fruiterie-app
 **Serveur** : http://localhost:8080 (backend Node/Express/Prisma + frontend buildé servi en dist)
 **DB** : PostgreSQL local
@@ -54,6 +54,15 @@
 ---
 
 ## 2. Roadmap restante
+
+### Session du 02/08 — RESTRUCTURATION Paiement Fournisseur (validée chef en vrai + capture navigateur)
+- **SÉPARATION création / règlement** : la page `/paiements-fournisseur/nouveau` ne fait QUE créer le bon (fournisseur + bordereaux cochés), état `en_attente`. Le bordereau N'EST PAS décrémenté à la création. Le règlement (Payer/Encaisser, partiel multiple) se fait APRÈS via les boutons.
+- **Statut de bon** : `SupplierPayment.status` (`en_attente` | `partiellement_paye` | `paye`). Recalculé après chaque règlement (tous bordereaux 'paye' → bon 'paye', sinon 'partiellement_paye'). Migration `20260802000010_add_supplier_payment_status` (prisma db execute add-only + migrate resolve --applied).
+- **Nouveau endpoint** `POST /api/supplier-payments/:id/pay` {mode:'PAY'|'ENCAISSER', method?, date?, lines:[{bordereauId,montant}]} : décrémente montantFinalDu + statut bordereau, PAY → Payment + décrément Supplier.balance (CASH → sortie caisse réouverture auto si clôturé), ENCAISSER → impute avance FIFO, recalcule status bon. Paiement PARTIEL multiple OK (gardes surpaiement/bon soldé → 400).
+- **Liste `/paiements-fournisseur`** : boutons **Payer / Encaisser à GAUCHE** (1ère colonne) + colonne Statut. Actifs si bon != 'paye'.
+- **Détail `/paiements-fournisseur/:id`** : colonnes **Bon de réception (BR-xxxx)** + **Produit** ajoutées au tableau (backend renvoie `receptionRef` + `productName`). Boutons Payer / Encaisser (avance) en haut + modale de règlement (montant par bordereau, reste dû par défaut).
+- **POINT D'ATTENTION (arci caisse)** : contrainte unique `(sourceType, sourceId)` sur CashRegisterEntry → 1 ligne de caisse PAR BON (cumulée au fil des versements), pas 1 ligne par versement. Si granularité par versement voulue, il faudra `sourceId` composite.
+- Builds backend+frontend 0 erreur. Données test nettoyées (0 BP actif). Commit `e03e6a1` + suivants.
 
 ### Session du 01/08 (soir 3) — CORRECTIFS Paiement Fournisseur (validés chef en vrai)
 - **MODIF 1** : Étape 1 = champ fournisseur SAISIE LIBRE (taper le nom → suggestions cliquables filtrées sur getSuppliers, aucune création auto). `SupplierPaymentNew.tsx` : Input + dropdown suggestions.

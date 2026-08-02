@@ -328,6 +328,7 @@ model SupplierPayment {
   date        DateTime      @default(now())
   mode        String        @default("PAY") // 'PAY' | 'ENCAISSER'
   method      PaymentMethod @default(CASH)
+  status      String        @default("en_attente") // 'en_attente' | 'partiellement_paye' | 'paye'
   totalAmount Decimal       @default(0) @db.Decimal(14, 2)
   notes       String?
   createdBy   String?

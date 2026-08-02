@@ -16,7 +16,7 @@ import { prisma } from '../prisma';
 import { requireAuth } from '../auth/middleware';
 import { dec } from './_helpers';
 import { nextEan13, EAN_PREFIX, ean13Png } from '../barcode';
-import { getOrCreateDay, recalculerEtPersister, assertPasDeDoublon } from './cash-register.routes';
+import { getOrCreateDay, recalculerEtPersister } from './cash-register.routes';
 import { buildSupplierPaymentPdf } from '../supplier-payments/pdf';
 
 const router = Router();
@@ -87,6 +87,7 @@ router.get('/', async (_req: Request, res: Response) => {
         totalAmount: dec(p.totalAmount),
         mode: p.mode,
         method: p.method,
+        status: p.status,
         ean13: p.ean13,
       })),
       total: items.length,
@@ -145,7 +146,7 @@ router.get('/eligible/:supplierId', async (req: Request, res: Response) => {
 const createSchema = z.object({
   supplierId: z.string().min(1, 'supplierId requis'),
   date: z.string().optional(),
-  mode: z.enum(['PAY', 'ENCAISSER']),
+  mode: z.enum(['PAY', 'ENCAISSER']).optional(),
   method: z.enum(['CASH', 'BANK_TRANSFER', 'CHECK', 'CARD']).optional(),
   notes: z.string().optional().nullable(),
   lines: z
@@ -163,7 +164,8 @@ router.post('/', async (req: Request, res: Response) => {
   if (!parsed.success) {
     return res.status(400).json({ error: 'Invalide', details: parsed.error.flatten() });
   }
-  const { supplierId, mode } = parsed.data;
+  const { supplierId } = parsed.data;
+  const mode = parsed.data.mode ?? 'PAY';
   const method = parsed.data.method ?? 'CASH';
   const datePaiement = parsed.data.date ? jour(parsed.data.date) : jour(new Date());
   const userId = (req as any).user?.id ?? null;
@@ -183,7 +185,7 @@ router.post('/', async (req: Request, res: Response) => {
         throw e;
       }
 
-      // --- Validation de chaque ligne ---
+      // --- Validation de chaque ligne (AUCUNE écriture sur le bordereau) ---
       const prepared: { bordereau: any; montant: Prisma.Decimal }[] = [];
       let total = ZERO;
       for (const l of parsed.data.lines) {
@@ -195,6 +197,166 @@ router.post('/', async (req: Request, res: Response) => {
         }
         if (b.supplierId !== supplierId) {
           const e: any = new Error(`Le bordereau ${b.reference} n\u2019appartient pas à ce fournisseur`);
+          e.status = 400;
+          throw e;
+        }
+        if (!STATUTS_PAYABLES.includes(b.statut)) {
+          const e: any = new Error(`Bordereau ${b.reference} non payable (statut ${b.statut})`);
+          e.status = 400;
+          throw e;
+        }
+        const du = D(b.montantFinalDu);
+        if (du.lessThanOrEqualTo(0)) {
+          const e: any = new Error(`Bordereau ${b.reference} : plus rien à payer`);
+          e.status = 400;
+          throw e;
+        }
+        let montant: Prisma.Decimal;
+        try {
+          montant = D(l.montant);
+        } catch {
+          const e: any = new Error(`Montant invalide pour ${b.reference}`);
+          e.status = 400;
+          throw e;
+        }
+        if (montant.lessThanOrEqualTo(0)) {
+          const e: any = new Error(`Montant doit être > 0 pour ${b.reference}`);
+          e.status = 400;
+          throw e;
+        }
+        if (montant.greaterThan(du)) {
+          const e: any = new Error(
+            `Surpaiement interdit : ${b.reference} montant ${montant.toFixed(2)} > dû ${du.toFixed(2)}`,
+          );
+          e.status = 400;
+          throw e;
+        }
+        total = total.plus(montant);
+        prepared.push({ bordereau: b, montant });
+      }
+
+      // --- Création du bon : status 'en_attente', RIEN n'est réglé ici ---
+      const reference = await nextBpRef(tx);
+      const ean13 = await nextEan13(tx, 'supplierPayment', EAN_PREFIX.supplierPayment);
+      const payment = await tx.supplierPayment.create({
+        data: {
+          reference,
+          ean13,
+          supplierId,
+          date: datePaiement,
+          mode,
+          method: method as any,
+          status: 'en_attente',
+          totalAmount: total,
+          notes: parsed.data.notes ?? null,
+          createdBy: userId,
+        },
+      });
+
+      const lignesOut: any[] = [];
+      for (const p of prepared) {
+        const b = p.bordereau;
+        const ligne = await tx.supplierPaymentLine.create({
+          data: { paymentId: payment.id, bordereauId: b.id, montant: p.montant },
+        });
+        lignesOut.push({
+          id: ligne.id,
+          bordereauId: b.id,
+          bordereauRef: b.reference,
+          montant: dec(p.montant),
+          reste: dec(D(b.montantFinalDu)),
+        });
+      }
+
+      return { payment, lignesOut };
+    });
+
+    res.status(201).json({
+      payment: {
+        id: out.payment.id,
+        reference: out.payment.reference,
+        ean13: out.payment.ean13,
+        totalAmount: dec(out.payment.totalAmount),
+        mode: out.payment.mode,
+        method: out.payment.method,
+        status: out.payment.status,
+        date: out.payment.date,
+      },
+      lines: out.lignesOut,
+    });
+  } catch (e: any) {
+    console.error('[supplier-payments] create error', e?.message);
+    res.status(e?.status ?? 500).json({ error: e?.message ?? 'Erreur création bon de paiement' });
+  }
+});
+
+// =====================================================================
+// POST /api/supplier-payments/:id/pay — RÈGLEMENT (partiel multiple).
+//   mode PAY       : Payment + décrément solde fournisseur (+ caisse si CASH)
+//   mode ENCAISSER : imputation FIFO des avances
+// Décrémente les bordereaux et recalcule le status du bon.
+// =====================================================================
+const paySchema = z.object({
+  mode: z.enum(['PAY', 'ENCAISSER']),
+  method: z.enum(['CASH', 'BANK_TRANSFER', 'CHECK', 'CARD']).optional(),
+  date: z.string().optional(),
+  lines: z
+    .array(
+      z.object({
+        bordereauId: z.string().min(1),
+        montant: z.union([z.string(), z.number()]),
+      }),
+    )
+    .min(1, 'au moins une ligne requise'),
+});
+
+router.post('/:id/pay', async (req: Request, res: Response) => {
+  const parsed = paySchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Invalide', details: parsed.error.flatten() });
+  }
+  const { mode } = parsed.data;
+  const method = parsed.data.method ?? 'CASH';
+  const datePaiement = parsed.data.date ? jour(parsed.data.date) : jour(new Date());
+  const userId = (req as any).user?.id ?? null;
+  const paymentId = String(req.params.id);
+
+  const ids = parsed.data.lines.map((l) => l.bordereauId);
+  if (new Set(ids).size !== ids.length) {
+    return res.status(400).json({ error: 'Un même bordereau ne peut apparaître qu\u2019une seule fois' });
+  }
+
+  try {
+    const out = await prisma.$transaction(async (tx) => {
+      const payment = await tx.supplierPayment.findFirst({
+        where: { id: paymentId, deletedAt: null },
+        include: { supplier: true, lines: true },
+      });
+      if (!payment) {
+        const e: any = new Error('Bon de paiement introuvable');
+        e.status = 404;
+        throw e;
+      }
+      if (payment.status === 'paye') {
+        const e: any = new Error('Bon déjà entièrement réglé');
+        e.status = 400;
+        throw e;
+      }
+      const supplierId = payment.supplierId;
+      const bordereauxDuBon = new Set(payment.lines.map((l) => l.bordereauId));
+
+      // --- Validation ---
+      const prepared: { bordereau: any; montant: Prisma.Decimal }[] = [];
+      let total = ZERO;
+      for (const l of parsed.data.lines) {
+        if (!bordereauxDuBon.has(l.bordereauId)) {
+          const e: any = new Error(`Bordereau ${l.bordereauId} n\u2019appartient pas à ce bon`);
+          e.status = 400;
+          throw e;
+        }
+        const b = await tx.supplierBordereau.findFirst({ where: { id: l.bordereauId, deletedAt: null } });
+        if (!b) {
+          const e: any = new Error(`Bordereau introuvable : ${l.bordereauId}`);
           e.status = 400;
           throw e;
         }
@@ -255,36 +417,14 @@ router.post('/', async (req: Request, res: Response) => {
         }
       }
 
-      // --- Création du bon ---
-      const reference = await nextBpRef(tx);
-      const ean13 = await nextEan13(tx, 'supplierPayment', EAN_PREFIX.supplierPayment);
-      const payment = await tx.supplierPayment.create({
-        data: {
-          reference,
-          ean13,
-          supplierId,
-          date: datePaiement,
-          mode,
-          method: method as any,
-          totalAmount: total,
-          notes: parsed.data.notes ?? null,
-          createdBy: userId,
-        },
-      });
-
-      const lignesOut: any[] = [];
-      // Copie mutable des avances pour la consommation FIFO.
       const pool = avances.map((a) => ({ ...a, restant: D(a.amount).minus(D(a.allocatedAmount)) }));
+      const lignesOut: any[] = [];
 
       for (const p of prepared) {
         const b = p.bordereau;
         const montant = p.montant;
 
-        const ligne = await tx.supplierPaymentLine.create({
-          data: { paymentId: payment.id, bordereauId: b.id, montant },
-        });
-
-        // Recharge + mise à jour du reste dû / statut.
+        // Décrément du reste dû + statut du bordereau.
         const frais = await tx.supplierBordereau.findUnique({ where: { id: b.id } });
         const nouveauDu = D(frais!.montantFinalDu).minus(montant);
         const resteFinal = nouveauDu.lessThan(0) ? ZERO : nouveauDu;
@@ -313,7 +453,6 @@ router.post('/', async (req: Request, res: Response) => {
             data: { balance: { decrement: montant } },
           });
         } else {
-          // ENCAISSER : imputation FIFO sur les avances disponibles.
           let reste = montant;
           for (const a of pool) {
             if (reste.lessThanOrEqualTo(0)) break;
@@ -349,12 +488,11 @@ router.post('/', async (req: Request, res: Response) => {
         }
 
         lignesOut.push({
-          id: ligne.id,
           bordereauId: b.id,
           bordereauRef: b.reference,
           montant: dec(montant),
-          montantDuAvant: dec(D(b.montantFinalDu)),
           reste: dec(resteFinal),
+          statut: resteFinal.lessThanOrEqualTo(0) ? 'paye' : 'partiellement_paye',
         });
       }
 
@@ -362,8 +500,6 @@ router.post('/', async (req: Request, res: Response) => {
       if (mode === 'PAY' && method === 'CASH') {
         const day = await getOrCreateDay(tx, datePaiement);
         if (day.status === 'cloturee') {
-          // Réouverture automatique silencieuse : un paiement fournisseur en
-          // espèces ne doit jamais être bloqué par une clôture du jour.
           await tx.cashRegisterDay.update({
             where: { id: day.id },
             data: { status: 'ouverte', closedBy: null, closedAt: null },
@@ -384,41 +520,66 @@ router.post('/', async (req: Request, res: Response) => {
             /* l'audit ne doit jamais bloquer le paiement */
           }
         }
-        await assertPasDeDoublon(tx, 'SUPPLIER_PAYMENT', payment.id);
-        await tx.cashRegisterEntry.create({
-          data: {
-            cashRegisterDayId: day.id,
-            direction: 'OUTPUT',
-            category: 'Paiement fournisseur',
-            amount: total,
-            sourceType: 'SUPPLIER_PAYMENT',
-            sourceId: payment.id,
-            reference: payment.reference,
-            description: `Règlement ${supplier.name}`,
-            createdBy: userId,
-          },
+        // Contrainte unique (sourceType, sourceId) : sur un règlement partiel
+        // multiple on cumule le montant sur l'écriture existante du bon.
+        const existante = await tx.cashRegisterEntry.findFirst({
+          where: { sourceType: 'SUPPLIER_PAYMENT', sourceId: payment.id },
         });
+        if (existante) {
+          await tx.cashRegisterEntry.update({
+            where: { id: existante.id },
+            data: {
+              cashRegisterDayId: day.id,
+              amount: D(existante.amount).plus(total),
+            },
+          });
+        } else {
+          await tx.cashRegisterEntry.create({
+            data: {
+              cashRegisterDayId: day.id,
+              direction: 'OUTPUT',
+              category: 'Paiement fournisseur',
+              amount: total,
+              sourceType: 'SUPPLIER_PAYMENT',
+              sourceId: payment.id,
+              reference: payment.reference,
+              description: `Règlement ${payment.supplier?.name ?? ''}`.trim(),
+              createdBy: userId,
+            },
+          });
+        }
         await recalculerEtPersister(tx, datePaiement);
       }
 
-      return { payment, lignesOut };
+      // --- Recalcul du status du bon ---
+      const tousLesBordereaux = await tx.supplierBordereau.findMany({
+        where: { id: { in: Array.from(bordereauxDuBon) }, deletedAt: null },
+        select: { statut: true },
+      });
+      const resteAPayer = tousLesBordereaux.filter((b) => b.statut !== 'paye').length;
+      const nouveauStatus = resteAPayer === 0 ? 'paye' : 'partiellement_paye';
+      const maj = await tx.supplierPayment.update({
+        where: { id: payment.id },
+        data: { status: nouveauStatus, mode, method: method as any },
+      });
+
+      return { payment: maj, lignesOut };
     });
 
-    res.status(201).json({
+    res.json({
       payment: {
         id: out.payment.id,
         reference: out.payment.reference,
-        ean13: out.payment.ean13,
-        totalAmount: dec(out.payment.totalAmount),
+        status: out.payment.status,
         mode: out.payment.mode,
         method: out.payment.method,
-        date: out.payment.date,
+        totalAmount: dec(out.payment.totalAmount),
       },
       lines: out.lignesOut,
     });
   } catch (e: any) {
-    console.error('[supplier-payments] create error', e?.message);
-    res.status(e?.status ?? 500).json({ error: e?.message ?? 'Erreur création bon de paiement' });
+    console.error('[supplier-payments] pay error', e?.message);
+    res.status(e?.status ?? 500).json({ error: e?.message ?? 'Erreur règlement bon de paiement' });
   }
 });
 
@@ -435,6 +596,29 @@ router.get('/:id', async (req: Request, res: Response) => {
       },
     });
     if (!p) return res.status(404).json({ error: 'Bon de paiement introuvable' });
+
+    // Réf. bon de réception (BR) + nom du produit par ligne, en 2 requêtes.
+    const receptionIds = Array.from(
+      new Set(p.lines.map((l) => l.bordereau?.receptionId).filter(Boolean) as string[]),
+    );
+    const productIds = Array.from(
+      new Set(p.lines.map((l) => l.bordereau?.productId).filter(Boolean) as string[]),
+    );
+    const receptions = receptionIds.length
+      ? await prisma.supplierReception.findMany({
+          where: { id: { in: receptionIds } },
+          select: { id: true, reference: true },
+        })
+      : [];
+    const produits = productIds.length
+      ? await prisma.product.findMany({
+          where: { id: { in: productIds } },
+          select: { id: true, name: true },
+        })
+      : [];
+    const refParId = new Map(receptions.map((r) => [r.id, r.reference]));
+    const nomParId = new Map(produits.map((r) => [r.id, r.name]));
+
     res.json({
       id: p.id,
       reference: p.reference,
@@ -442,6 +626,7 @@ router.get('/:id', async (req: Request, res: Response) => {
       date: p.date,
       mode: p.mode,
       method: p.method,
+      status: p.status,
       totalAmount: dec(p.totalAmount),
       notes: p.notes,
       supplier: p.supplier,
@@ -449,6 +634,8 @@ router.get('/:id', async (req: Request, res: Response) => {
         id: l.id,
         bordereauId: l.bordereauId,
         bordereauRef: l.bordereau?.reference ?? '—',
+        receptionRef: (l.bordereau?.receptionId && refParId.get(l.bordereau.receptionId)) ?? null,
+        productName: (l.bordereau?.productId && nomParId.get(l.bordereau.productId)) ?? null,
         dateCloture: l.bordereau?.dateCloture ?? null,
         statut: l.bordereau?.statut ?? null,
         montant: dec(l.montant),

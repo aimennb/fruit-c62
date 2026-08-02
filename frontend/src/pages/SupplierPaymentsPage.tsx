@@ -21,8 +21,14 @@ export default function SupplierPaymentsPage() {
   }, [])
 
   const headers = ar
-    ? ['التاريخ', 'المرجع', 'المورد', 'المبلغ', 'النوع', '']
-    : ['Date', 'Réf.', 'Fournisseur', 'Montant total', 'Mode', '']
+    ? ['', 'التاريخ', 'المرجع', 'المورد', 'المبلغ', 'النوع', 'الحالة', '']
+    : ['', 'Date', 'Réf.', 'Fournisseur', 'Montant total', 'Mode', 'Statut', '']
+
+  function statusLabel(st?: string) {
+    if (st === 'paye') return ar ? 'مدفوع' : 'Payé'
+    if (st === 'partiellement_paye') return ar ? 'مدفوع جزئيا' : 'Partiellement payé'
+    return ar ? 'في الانتظار' : 'En attente'
+  }
 
   return (
     <div>
@@ -46,6 +52,26 @@ export default function SupplierPaymentsPage() {
         <Table headers={headers}>
           {items.map((p) => (
             <tr key={p.id} className="hover:bg-gray-50">
+              {/* Boutons de règlement à GAUCHE (comme la page Factures) */}
+              <td className="px-4 py-3 whitespace-nowrap">
+                <div className="flex items-center gap-2">
+                  <Button
+                    className="px-3"
+                    disabled={p.status === 'paye'}
+                    onClick={() => navigate(`/paiements-fournisseur/${p.id}?regler=PAY`)}
+                  >
+                    {ar ? 'دفع' : 'Payer'}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    className="px-3"
+                    disabled={p.status === 'paye'}
+                    onClick={() => navigate(`/paiements-fournisseur/${p.id}?regler=ENCAISSER`)}
+                  >
+                    {ar ? 'تحصيل' : 'Encaisser'}
+                  </Button>
+                </div>
+              </td>
               <td className="px-4 py-3 whitespace-nowrap">{new Date(p.date).toLocaleDateString('fr-FR')}</td>
               <td className="px-4 py-3 font-semibold text-gray-800 whitespace-nowrap">{p.reference}</td>
               <td className="px-4 py-3 whitespace-nowrap">{p.supplierName}</td>
@@ -55,6 +81,13 @@ export default function SupplierPaymentsPage() {
               <td className="px-4 py-3 whitespace-nowrap">
                 <Badge color={p.mode === 'PAY' ? 'blue' : 'amber'}>
                   {p.mode === 'PAY' ? (ar ? 'دفع' : 'Payer') : ar ? 'تحصيل' : 'Encaisser'}
+                </Badge>
+              </td>
+              <td className="px-4 py-3 whitespace-nowrap">
+                <Badge
+                  color={p.status === 'paye' ? 'green' : p.status === 'partiellement_paye' ? 'amber' : 'gray'}
+                >
+                  {statusLabel(p.status)}
                 </Badge>
               </td>
               <td className="px-4 py-3">

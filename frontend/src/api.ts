@@ -880,6 +880,7 @@ export interface SupplierPaymentRow {
   totalAmount: string
   mode: string
   method: string
+  status?: string
   ean13?: string | null
 }
 export interface EligibleBordereau {
@@ -899,12 +900,15 @@ export interface SupplierPaymentDetailDTO {
   mode: string
   method: string
   totalAmount: string
+  status?: string
   notes?: string | null
   supplier?: { id: string; name: string; phone?: string | null; wilaya?: string | null } | null
   lines: {
     id: string
     bordereauId: string
     bordereauRef: string
+    receptionRef?: string | null
+    productName?: string | null
     dateCloture: string | null
     statut: string | null
     montant: string
@@ -935,6 +939,20 @@ export function createSupplierPayment(payload: {
 }
 export function getSupplierPayment(id: string) {
   return request<SupplierPaymentDetailDTO>(`/api/supplier-payments/${id}`)
+}
+export function paySupplierPayment(
+  id: string,
+  payload: {
+    mode: 'PAY' | 'ENCAISSER'
+    method?: 'CASH' | 'BANK_TRANSFER' | 'CHECK' | 'CARD'
+    date?: string
+    lines: { bordereauId: string; montant: number | string }[]
+  },
+) {
+  return request<{ payment: SupplierPaymentRow; lines: unknown[] }>(
+    `/api/supplier-payments/${id}/pay`,
+    { method: 'POST', body: JSON.stringify(payload) },
+  )
 }
 export async function openSupplierPaymentPdf(id: string): Promise<void> {
   const token = getToken()
