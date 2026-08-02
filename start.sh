@@ -12,8 +12,14 @@ APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 BACKEND_DIR="$APP_DIR/backend"
 FRONTEND_DIR="$APP_DIR/frontend"
 API_URL="${VITE_API_URL:-http://localhost:8080}"   # IP exposée pour le front
-DB_PUSH=1
-[[ "${1:-}" == "--no-pull" ]] && DB_PUSH=0
+DO_PULL=1
+# Parsing args : --no-pull (saute git pull) | http://... (API_URL du front)
+for a in "$@"; do
+  case "$a" in
+    --no-pull) DO_PULL=0 ;;
+    http*) API_URL="$a" ;;
+  esac
+done
 
 # --- Couleurs ----------------------------------------------------------------
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
@@ -24,7 +30,7 @@ err(){ echo -e "${R}[err]${N} $*"; }
 cd "$APP_DIR"
 
 # --- 1. Récupérer le code ----------------------------------------------------
-if [[ "$DB_PUSH" -eq 1 ]]; then
+if [[ "$DO_PULL" -eq 1 ]]; then
   log "git pull origin main"
   git pull origin main
 else
@@ -57,10 +63,26 @@ VITE_API_URL="$API_URL" npm run build
 
 # --- 4. Démarrage ------------------------------------------------------------
 cd "$BACKEND_DIR"
-if command -v docker >/dev/null 2>&1 && docker ps -q 2>/dev/null | grep -q .; then
-  warn "Docker détecté — si tes conteneurs gèrent le backend, relance-les :"
-  warn "  docker compose restart (ou docker compose up -d --build)"
-  warn "Le build backend/front est fait ; redémarre tes conteneurs pour le prendre en compte."
+# Un conteneur backend existe-t-il (nom contenant 'backend') ?
+BACK_CONTAINER=$(docker ps -q --filter "name=backend" 2>/dev/null | head -1 || true)
+if [[ -n "$BACK_CONTAINER" ]]; then
+  warn "Conteneur backend détecté ($BACK_CONTAINER) — redémarre-le :"
+  warn "  docker compose restart backend   (ou docker restart $BACK_CONTAINER)"
+  warn "Le build backend/front est fait ; redémarre le conteneur pour le prendre en compte."
+elif command -v docker >/dev/null 2>&1 && docker ps -q 2>/dev/null | grep -q .; then
+  # Docker présent mais PAS de conteneur backend -> on lance node quand même
+  # (cas typique Mac : Postgres dans Docker, backend en node local)
+  log "Docker présent mais aucun conteneur backend — lancement du backend node"
+  pkill -f "node dist/src/index.js" 2>/dev/null || true
+  sleep 1
+  nohup node dist/src/index.js > /tmp/fruiterie-backend.log 2>&1 &
+  sleep 4
+  if curl -s -m 5 http://localhost:8080/api/health >/dev/null 2>&1; then
+    log "${G}Backend UP${N} — http://localhost:8080/api/health OK"
+  else
+    err "Backend pas joignable — voir /tmp/fruiterie-backend.log"
+    exit 1
+  fi
 else
   log "Arrêt d'un éventuel backend node sur 8080"
   pkill -f "node dist/src/index.js" 2>/dev/null || true
