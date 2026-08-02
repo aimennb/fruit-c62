@@ -912,6 +912,8 @@ export interface SupplierPaymentDetailDTO {
     dateCloture: string | null
     statut: string | null
     montant: string
+    montantDuAvant?: string | null
+    montantPaye?: string | null
     reste: string | null
   }[]
 }

@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { prisma } from '../prisma';
 import { verifyAccessToken } from './tokens';
 import { Role } from '@prisma/client';
+import { getUserPermissions } from './permissions';
 
 export interface AuthUser {
   id: string;
@@ -92,14 +93,9 @@ export function requirePermission(...codes: string[]) {
       return;
     }
     try {
-      const perms = await prisma.permission.findMany({
-        where: {
-          code: { in: codes },
-          rolePermissions: { some: { role: req.user.role } },
-        },
-        select: { code: true },
-      });
-      const ok = codes.every((c) => perms.some((p) => p.code === c));
+      // Permissions EFFECTIVES (rôle - DENY + GRANT par utilisateur).
+      const effective = await getUserPermissions(req.user.id, req.user.role);
+      const ok = codes.every((c) => effective.includes(c));
       if (!ok) {
         res.status(403).json({
           error: 'Permission refusée',

@@ -6,7 +6,7 @@ import type { User } from './types'
 interface AuthState {
   user: User | null
   loading: boolean
-  login: (username: string, password: string) => Promise<void>
+  login: (username: string, password: string) => Promise<User>
   logout: () => void
   hasPerm: (perm: string) => boolean
 }
@@ -30,12 +30,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(async (username: string, password: string) => {
     const res = await apiLogin(username, password)
     localStorage.setItem('token', res.accessToken)
-    if (res.user) {
-      setUser(res.user)
-    } else {
-      const me = await getMe()
-      setUser(me)
-    }
+    // On recharge toujours /me : la réponse de login ne contient pas les permissions.
+    const me = await getMe()
+    setUser(me)
+    return me
   }, [])
 
   const hasPerm = useCallback(

@@ -150,9 +150,16 @@ export default function SupplierPaymentDetail() {
             disabled={listePayables.length === 0}
             onClick={() => ouvrirReglement('ENCAISSER')}
           >
-            {ar ? 'تحصيل من السلفة' : 'Encaisser (avance)'}
+            {ar ? 'دفع مؤجل' : 'Paiement différé'}
           </Button>
         </div>
+      )}
+      {p.status !== 'paye' && (
+        <p className="mb-4 text-xs text-gray-500">
+          {ar
+            ? 'الدفع المؤجل: تسديد المبلغ المستحق على عدة دفعات.'
+            : 'Règlement en plusieurs fois du montant dû'}
+        </p>
       )}
 
       <Card className="mb-4">
@@ -164,8 +171,15 @@ export default function SupplierPaymentDetail() {
           <div>
             <div className="text-gray-500">Mode</div>
             <Badge color={p.mode === 'PAY' ? 'blue' : 'amber'}>
-              {p.mode === 'PAY' ? 'Payer' : 'Encaisser'}
+              {p.mode === 'PAY' ? 'Payer' : 'Paiement différé'}
             </Badge>
+            {p.mode !== 'PAY' && (
+              <div className="mt-1 text-xs text-gray-500">
+                {ar
+                  ? 'خصم من سلفة مدفوعة مسبقاً (لا يخرج من الصندوق).'
+                  : 'Impute une avance déjà encaissée auprès du fournisseur (ne sort pas de caisse).'}
+              </div>
+            )}
           </div>
           <div>
             <div className="text-gray-500">{ar ? 'الطريقة' : 'Méthode'}</div>
@@ -210,7 +224,7 @@ export default function SupplierPaymentDetail() {
             <td className="px-4 py-3 whitespace-nowrap">
               {l.dateCloture ? new Date(l.dateCloture).toLocaleDateString('fr-FR') : '—'}
             </td>
-            <td className="px-4 py-3 text-right whitespace-nowrap">{Number(l.montant).toFixed(2)} DA</td>
+            <td className="px-4 py-3 text-right whitespace-nowrap">{Number(l.montantPaye ?? 0).toFixed(2)} DA</td>
             <td className="px-4 py-3 text-right whitespace-nowrap">{Number(l.reste ?? 0).toFixed(2)} DA</td>
             <td className="px-4 py-3 whitespace-nowrap">{l.statut ?? '—'}</td>
           </tr>
@@ -227,8 +241,8 @@ export default function SupplierPaymentDetail() {
                 ? 'دفع'
                 : 'Payer'
               : ar
-                ? 'تحصيل من السلفة'
-                : 'Encaisser (avance)'
+                ? 'دفع مؤجل'
+                : 'Paiement différé'
           }
         >
           {payError && <ErrorBox message={payError} />}

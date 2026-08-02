@@ -124,6 +124,7 @@ model User {
 
   sessions  Session[]
   auditLogs AuditLog[]
+  userPermissions UserPermission[]
 
   @@index([role])
   @@index([deletedAt])
@@ -140,6 +141,7 @@ model Permission {
   updatedAt   DateTime @updatedAt
 
   rolePermissions RolePermission[]
+  userPermissions UserPermission[]
 
   @@index([module])
 }
@@ -152,6 +154,20 @@ model RolePermission {
   permission   Permission @relation(fields: [permissionId], references: [id])
 
   @@id([role, permissionId])
+  @@index([permissionId])
+}
+
+// Override de permission par utilisateur : GRANT (ajout) ou DENY (retrait)
+// appliqué par-dessus les permissions héritées du rôle.
+model UserPermission {
+  userId       String
+  permissionId String
+  type         String // "GRANT" | "DENY"
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  createdAt    DateTime   @default(now())
+
+  @@id([userId, permissionId])
   @@index([permissionId])
 }
 
@@ -350,6 +366,10 @@ model SupplierPaymentLine {
   bordereauId String
   bordereau   SupplierBordereau @relation(fields: [bordereauId], references: [id])
   montant     Decimal           @db.Decimal(14, 2)
+  // Dû du bordereau FIGÉ au moment de la création du bon de paiement.
+  montantDuAvant Decimal?       @db.Decimal(14, 2)
+  // Cumul réellement réglé sur cette ligne (incrémenté par POST /:id/pay).
+  montantPaye    Decimal?       @db.Decimal(14, 2)
   createdAt   DateTime          @default(now())
 
   @@index([paymentId])

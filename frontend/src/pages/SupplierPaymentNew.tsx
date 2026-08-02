@@ -195,7 +195,7 @@ export default function SupplierPaymentNew() {
           ) : (
             <>
               <Table
-                headers={['', 'Réf.', 'Bon de réception', 'Date clôture', 'Montant dû', 'Montant prévu', 'Statut']}
+                headers={['', 'Réf.', 'Bon de réception', 'Date clôture', 'Montant dû', 'Montant à payer', 'Statut']}
               >
                 {eligibles.map((b) => (
                   <tr

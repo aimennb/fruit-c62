@@ -5,6 +5,7 @@ import { prisma } from '../prisma';
 import { config } from '../config';
 import { auditLog } from './audit';
 import { loginRateLimit, registerLoginFailure, resetLoginAttempts } from './rateLimit';
+import { getUserPermissionsDetail } from './permissions';
 import {
   signAccessToken,
   createRefreshSession,
@@ -149,10 +150,8 @@ router.get('/me', async (req: Request, res: Response) => {
       res.status(401).json({ error: 'Utilisateur introuvable' });
       return;
     }
-    const perms = await prisma.permission.findMany({
-      where: { rolePermissions: { some: { role: user.role } } },
-      select: { code: true, label: true, module: true },
-    });
+    // Permissions EFFECTIVES : rôle MOINS DENY user PLUS GRANT user.
+    const perms = await getUserPermissionsDetail(user.id, user.role);
     res.json({
       id: user.id,
       username: user.username,

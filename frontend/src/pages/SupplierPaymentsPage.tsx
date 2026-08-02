@@ -68,7 +68,7 @@ export default function SupplierPaymentsPage() {
                     disabled={p.status === 'paye'}
                     onClick={() => navigate(`/paiements-fournisseur/${p.id}?regler=ENCAISSER`)}
                   >
-                    {ar ? 'تحصيل' : 'Encaisser'}
+                    {ar ? 'دفع مؤجل' : 'Paiement différé'}
                   </Button>
                 </div>
               </td>
@@ -80,7 +80,7 @@ export default function SupplierPaymentsPage() {
               </td>
               <td className="px-4 py-3 whitespace-nowrap">
                 <Badge color={p.mode === 'PAY' ? 'blue' : 'amber'}>
-                  {p.mode === 'PAY' ? (ar ? 'دفع' : 'Payer') : ar ? 'تحصيل' : 'Encaisser'}
+                  {p.mode === 'PAY' ? (ar ? 'دفع' : 'Payer') : ar ? 'دفع مؤجل' : 'Paiement différé'}
                 </Badge>
               </td>
               <td className="px-4 py-3 whitespace-nowrap">

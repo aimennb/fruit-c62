@@ -103,12 +103,19 @@ router.get('/', async (_req: Request, res: Response) => {
 router.get('/eligible/:supplierId', async (req: Request, res: Response) => {
   try {
     const supplierId = String(req.params.supplierId);
+    // Règle métier : « 1 bordereau = 1 seul BP ». Tout bordereau déjà présent
+    // dans une ligne de bon de paiement (réglé ou non) est exclu.
+    const dejaPris = await prisma.supplierPaymentLine.findMany({
+      select: { bordereauId: true },
+    });
+    const idsExclus = Array.from(new Set(dejaPris.map((l) => l.bordereauId)));
     const rows = await prisma.supplierBordereau.findMany({
       where: {
         supplierId,
         deletedAt: null,
         statut: { in: STATUTS_PAYABLES },
         montantFinalDu: { gt: 0 },
+        ...(idsExclus.length ? { id: { notIn: idsExclus } } : {}),
       },
       orderBy: [{ dateCloture: 'asc' }, { createdAt: 'asc' }],
     });
@@ -257,7 +264,15 @@ router.post('/', async (req: Request, res: Response) => {
       for (const p of prepared) {
         const b = p.bordereau;
         const ligne = await tx.supplierPaymentLine.create({
-          data: { paymentId: payment.id, bordereauId: b.id, montant: p.montant },
+          data: {
+            paymentId: payment.id,
+            bordereauId: b.id,
+            montant: p.montant,
+            // Dû figé à la création (le bordereau n'est pas encore décrémenté).
+            montantDuAvant: D(b.montantFinalDu),
+            // Rien n'est encore réglé à la création du bon de paiement.
+            montantPaye: D(0),
+          },
         });
         lignesOut.push({
           id: ligne.id,
@@ -494,6 +509,18 @@ router.post('/:id/pay', async (req: Request, res: Response) => {
           reste: dec(resteFinal),
           statut: resteFinal.lessThanOrEqualTo(0) ? 'paye' : 'partiellement_paye',
         });
+
+        // Cumul du montant réellement réglé sur la ligne du bon de paiement.
+        const ligneBP = await tx.supplierPaymentLine.findFirst({
+          where: { paymentId: payment.id, bordereauId: b.id },
+        });
+        if (ligneBP) {
+          const dejaPaye = D(ligneBP.montantPaye ?? 0);
+          await tx.supplierPaymentLine.update({
+            where: { id: ligneBP.id },
+            data: { montantPaye: dejaPaye.plus(montant) },
+          });
+        }
       }
 
       // --- Sortie de caisse (uniquement PAY + CASH) ---
@@ -639,6 +666,8 @@ router.get('/:id', async (req: Request, res: Response) => {
         dateCloture: l.bordereau?.dateCloture ?? null,
         statut: l.bordereau?.statut ?? null,
         montant: dec(l.montant),
+        montantDuAvant: dec(l.montantDuAvant),
+        montantPaye: dec(l.montantPaye ?? 0),
         reste: dec(l.bordereau?.montantFinalDu),
       })),
     });
@@ -673,13 +702,14 @@ router.get('/:id/pdf', async (req: Request, res: Response) => {
         ean13: p.ean13,
       },
       p.lines.map((l) => {
-        const reste = D(l.bordereau?.montantFinalDu ?? 0);
+        const duAvant = D(l.montantDuAvant ?? 0);
+        const paye = D(l.montantPaye ?? 0);
         return {
           bordereauRef: l.bordereau?.reference ?? '—',
           dateCloture: l.bordereau?.dateCloture ? l.bordereau.dateCloture.toISOString() : null,
-          montantDuAvant: reste.plus(D(l.montant)).toFixed(2),
-          montantPaye: dec(l.montant) ?? '0',
-          reste: reste.toFixed(2),
+          montantDuAvant: duAvant.toFixed(2),
+          montantPaye: paye.toFixed(2),
+          reste: duAvant.minus(paye).toFixed(2),
         };
       }),
       { name: p.supplier?.name ?? '—', phone: p.supplier?.phone, wilaya: p.supplier?.wilaya },

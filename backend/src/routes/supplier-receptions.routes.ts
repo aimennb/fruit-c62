@@ -9,7 +9,7 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
-import { requireAuth } from '../auth/middleware';
+import { requireAuth, requirePermission } from '../auth/middleware';
 import { dec } from './_helpers';
 import { buildReceptionPdf, type CompanyParams } from '../receptions/pdf';
 import { nextEan13, EAN_PREFIX, buildEan13Only } from '../barcode';
@@ -110,7 +110,7 @@ function serialize(r: any, bordereau?: any, lot?: any, advance?: any) {
 }
 
 // POST /api/supplier-receptions — création + chaînage auto lot/bordereau/stock/avance
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', requirePermission('RECEPTION_WRITE'), async (req: Request, res: Response) => {
   const parsed = createSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: 'Données invalides', details: parsed.error.flatten() });
@@ -345,7 +345,7 @@ router.post('/', async (req: Request, res: Response) => {
 });
 
 // GET /api/supplier-receptions — liste
-router.get('/', async (_req: Request, res: Response) => {
+router.get('/', requirePermission('RECEPTION_WRITE'), async (_req: Request, res: Response) => {
   const items = await prisma.supplierReception.findMany({
     where: { deletedAt: null },
     orderBy: { createdAt: 'desc' },
@@ -362,7 +362,7 @@ router.get('/', async (_req: Request, res: Response) => {
 });
 
 // GET /api/supplier-receptions/:id
-router.get('/:id', async (req: Request, res: Response) => {
+router.get('/:id', requirePermission('RECEPTION_WRITE'), async (req: Request, res: Response) => {
   const r = await prisma.supplierReception.findFirst({
     where: { id: req.params.id, deletedAt: null },
   });
@@ -385,7 +385,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 });
 
 // PATCH /api/supplier-receptions/:id — mise à jour champs éditables
-router.patch('/:id', async (req: Request, res: Response) => {
+router.patch('/:id', requirePermission('RECEPTION_WRITE'), async (req: Request, res: Response) => {
   const parsed = updateSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: 'Données invalides', details: parsed.error.flatten() });
@@ -772,7 +772,7 @@ router.patch('/:id', async (req: Request, res: Response) => {
 });
 
 // GET /api/supplier-receptions/:id/pdf — bon de réception PDF A5 bilingue
-router.get('/:id/pdf', async (req: Request, res: Response) => {
+router.get('/:id/pdf', requirePermission('RECEPTION_WRITE'), async (req: Request, res: Response) => {
   try {
     const r = await prisma.supplierReception.findFirst({
       where: { id: req.params.id, deletedAt: null },

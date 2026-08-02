@@ -24,6 +24,24 @@ const NAV: NavItem[] = [
   { to: '/depenses', fr: 'Dépenses', ar: 'المصاريف' },
 ]
 
+// Mapping route -> permission requise pour l'affichage dans le menu.
+// Une route absente de ce mapping est visible par tous les utilisateurs
+// authentifiés (ex: /dashboard).
+const NAV_PERM: Record<string, string> = {
+  '/dashboard': 'SALE_READ',
+  '/ventes': 'SALE_READ',
+  '/bordereaux': 'PURCHASE_READ',
+  '/stock': 'STOCK_READ',
+  '/produits': 'PRODUCT_READ',
+  '/fournisseurs': 'SUPPLIER_READ',
+  '/clients': 'CUSTOMER_READ',
+  '/avances': 'PURCHASE_READ',
+  '/paiements-fournisseur': 'PAYMENT_READ',
+  '/receptions': 'RECEPTION_WRITE',
+  '/caisse': 'PAYMENT_READ',
+  '/depenses': 'PAYMENT_READ',
+}
+
 const ICONS: Record<string, ReactNode> = {
   '/dashboard': (
     <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
@@ -64,9 +82,15 @@ const ICONS: Record<string, ReactNode> = {
 }
 
 export default function Layout({ children }: { children: ReactNode }) {
-  const { user, logout } = useAuth()
+  const { user, logout, hasPerm } = useAuth()
   const { lang, toggle, tr } = useLang()
   const navigate = useNavigate()
+
+  // Menu filtré par permission : un utilisateur restreint (RECEPTION_WRITE seul)
+  // ne voit que l'entrée /receptions.
+  const visibleNav = NAV.filter((item) =>
+    NAV_PERM[item.to] ? hasPerm(NAV_PERM[item.to]) : true,
+  )
 
   const onLogout = () => {
     logout()
@@ -82,7 +106,7 @@ export default function Layout({ children }: { children: ReactNode }) {
           <span className="font-bold text-lg text-fruite-green">{tr('appName')}</span>
         </div>
         <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
-          {NAV.map((item) => (
+          {visibleNav.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
@@ -141,7 +165,7 @@ export default function Layout({ children }: { children: ReactNode }) {
       {/* Bottom nav (mobile) */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-white border-t border-gray-100 overflow-x-auto">
         <div className="flex min-w-max">
-        {NAV.map((item) => (
+        {visibleNav.map((item) => (
           <NavLink
             key={item.to}
             to={item.to}

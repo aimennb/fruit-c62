@@ -51,8 +51,10 @@ function Login() {
     setError('')
     setLoading(true)
     try {
-      await login(username, password)
-      navigate('/dashboard')
+      const u = await login(username, password)
+      // Utilisateur restreint (réceptionnaire) : pas de SALE_READ -> /receptions
+      const perms = (u as { permissions?: string[] } | undefined)?.permissions ?? []
+      navigate(perms.includes('SALE_READ') ? '/dashboard' : '/receptions')
     } catch (err) {
       setError((err as Error).message)
     } finally {
