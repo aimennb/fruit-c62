@@ -1,73 +1,81 @@
 #!/usr/bin/env bash
-#
-# start.sh — Lance Fruiterie ERP en local (dev/prod) sur macOS (ou Linux).
-# Le backend Node sert aussi le frontend React buildé (port 8080).
-#
-# PRÉREQUIS :
-#   - Node.js 22+ (https://nodejs.org ou `brew install node`)
-#   - Une base PostgreSQL 16+ DISPONIBLE, avec une DATABASE_URL valide.
-#     Option A (Docker) :  docker run -d --name fruiterie-pg -p 5432:5432 \
-#                            -e POSTGRES_USER=fruiterie -e POSTGRES_PASSWORD=fruiterie \
-#                            -e POSTGRES_DB=fruiterie postgres:16
-#     Option B (Postgres.app) : lancer l'app, puis utiliser son URL.
-#
-# USAGE :
-#   ./start.sh            # build complet + migrate + seed + démarrage
-#   ./start.sh --no-build # démarre directement (si déjà buildé)
-#   ./start.sh --dev      # mode dev (tsx watch) au lieu de dist
-#
+# =============================================================================
+# start.sh — Mise à jour + démarrage de Fruiterie ERP
+# Usage : ./start.sh            (depuis la racine fruiterie-app)
+#         ./start.sh --no-pull  (saute le git pull)
+# Compatible : serveur Linux (node) et Mac local (Docker ou node).
+# =============================================================================
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKEND="$ROOT/backend"
-FRONTEND="$ROOT/frontend"
+# --- Config (à adapter si besoin) -------------------------------------------
+APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+BACKEND_DIR="$APP_DIR/backend"
+FRONTEND_DIR="$APP_DIR/frontend"
+API_URL="${VITE_API_URL:-http://localhost:8080}"   # IP exposée pour le front
+DB_PUSH=1
+[[ "${1:-}" == "--no-pull" ]] && DB_PUSH=0
 
-# --- DATABASE_URL -----------------------------------------------------------
-# Priorité : variable d'env déjà posée > .env backend > valeur par défaut Docker.
-if [ -z "${DATABASE_URL:-}" ]; then
-  if [ -f "$BACKEND/.env" ]; then
-    set -a; source "$BACKEND/.env"; set +a
+# --- Couleurs ----------------------------------------------------------------
+G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
+log(){ echo -e "${G}[start]${N} $*"; }
+warn(){ echo -e "${Y}[warn]${N} $*"; }
+err(){ echo -e "${R}[err]${N} $*"; }
+
+cd "$APP_DIR"
+
+# --- 1. Récupérer le code ----------------------------------------------------
+if [[ "$DB_PUSH" -eq 1 ]]; then
+  log "git pull origin main"
+  git pull origin main
+else
+  warn "skip git pull (--no-pull)"
+fi
+
+# --- 2. Backend : install + prisma + seed + build ---------------------------
+log "== BACKEND =="
+cd "$BACKEND_DIR"
+log "npm install"
+npm install
+log "prisma generate"
+npx prisma generate
+log "prisma db push (sync schéma, sans perte de données)"
+npx prisma db push
+log "seed (permissions + RECEPTION_READ/WRITE)"
+npx tsx prisma/seed.ts
+log "setup réceptionnaire (utilisateur receptionnaire + verrou)"
+npx tsx prisma/setup-receptionnaire.ts
+log "build backend"
+npm run build
+
+# --- 3. Frontend : install + build -------------------------------------------
+log "== FRONTEND =="
+cd "$FRONTEND_DIR"
+log "npm install"
+npm install
+log "build front (VITE_API_URL=$API_URL)"
+VITE_API_URL="$API_URL" npm run build
+
+# --- 4. Démarrage ------------------------------------------------------------
+cd "$BACKEND_DIR"
+if command -v docker >/dev/null 2>&1 && docker ps -q 2>/dev/null | grep -q .; then
+  warn "Docker détecté — si tes conteneurs gèrent le backend, relance-les :"
+  warn "  docker compose restart (ou docker compose up -d --build)"
+  warn "Le build backend/front est fait ; redémarre tes conteneurs pour le prendre en compte."
+else
+  log "Arrêt d'un éventuel backend node sur 8080"
+  pkill -f "node dist/src/index.js" 2>/dev/null || true
+  sleep 1
+  log "Démarrage backend (node dist/src/index.js) en arrière-plan"
+  nohup node dist/src/index.js > /tmp/fruiterie-backend.log 2>&1 &
+  sleep 4
+  if curl -s -m 5 http://localhost:8080/api/health >/dev/null 2>&1; then
+    log "${G}Backend UP${N} — http://localhost:8080/api/health OK"
+  else
+    err "Backend pas joignable — voir /tmp/fruiterie-backend.log"
+    exit 1
   fi
 fi
-export DATABASE_URL="${DATABASE_URL:-postgresql://fruiterie:fruiterie@localhost:5432/fruiterie}"
 
-NO_BUILD=0
-DEV=0
-for arg in "$@"; do
-  case "$arg" in
-    --no-build) NO_BUILD=1 ;;
-    --dev)      DEV=1 ;;
-  esac
-done
-
-echo "== Fruiterie ERP =="
-echo "DB  : $DATABASE_URL"
-
-# --- Dépendances + Prisma --------------------------------------------------
-echo "== Installation des dépendances =="
-( cd "$BACKEND"  && npm install --no-audit --no-fund )
-( cd "$FRONTEND" && npm install --no-audit --no-fund )
-
-( cd "$BACKEND" && npx prisma generate )
-
-if [ "$NO_BUILD" -eq 0 ]; then
-  echo "== Build backend =="
-  ( cd "$BACKEND"  && npm run build )
-  echo "== Build frontend =="
-  ( cd "$FRONTEND" && npm run build )
-fi
-
-# --- Migrations + seed (idempotent) ----------------------------------------
-echo "== Migrations Prisma =="
-( cd "$BACKEND" && npx prisma migrate deploy ) || echo "(!) migrate deploy a échoué — vérifie DATABASE_URL"
-echo "== Seed (référentiel de démo) =="
-( cd "$BACKEND" && npm run seed ) || echo "(!) seed a échoué — vérifie DATABASE_URL"
-
-# --- Démarrage -------------------------------------------------------------
-echo "== Démarrage sur http://localhost:8080 =="
-echo "   Comptes : admin/admin123 · responsable/resp123 · employe/emp123"
-if [ "$DEV" -eq 1 ]; then
-  ( cd "$BACKEND" && exec npm run dev )
-else
-  ( cd "$BACKEND" && exec node dist/src/index.js )
-fi
+log "${G}Terminé.${N}"
+log "Frontend buildé dans $FRONTEND_DIR/dist — sers ce dossier (nginx/static server)."
+log "Admin : admin / admin123  |  Réceptionnaire : receptionnaire / [REDACTED]"
