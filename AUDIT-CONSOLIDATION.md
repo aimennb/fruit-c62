@@ -3,7 +3,7 @@
 Date : 2026-08-04 · Périmètre : backend + frontend Fruiterie ERP
 Experts : Architect (backend), DB/Prisma, Logique métier/compta, Frontend/UX, Sécurité, QA
 Mode : 100% lecture seule (aucun fichier de code modifié, aucune donnée créée, aucun push intermédiaire).
-Rapports détaillés : AUDIT-architect.md, AUDIT-db.md, AUDIT-backend-logic.md, AUDIT-frontend.md, AUDIT-securite.md, AUDIT-qa.md (en cours).
+Rapports détaillés : AUDIT-architect.md, AUDIT-db.md, AUDIT-backend-logic.md, AUDIT-frontend.md, AUDIT-securite.md, AUDIT-qa.md (6 rapports complets).
 
 > Les 3 bugs critiques corrigés avant l'audit (recyclage de bordereau, ventes comptant en crédit caisse, paiement fournisseur dans les dépenses) ne sont PAS re-signalés ci-dessous.
 
