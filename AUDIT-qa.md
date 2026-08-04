@@ -1,290 +1,519 @@
-# AUDIT QA / chasse aux bugs — Fruiterie ERP
+# AUDIT QA / Chasse aux bugs — Fruiterie ERP
 
-Date : 2026-08-04 · Mode : **lecture seule** (read_file / search_files + `curl GET` sur `http://localhost:8080`)
-Périmètre : backend `/home/mimo/fruiterie-app/backend/src/routes/*.ts` + données de test en base.
-Exclu du rapport (déjà corrigés) : 1 réception = 1 bordereau, ventes comptant non comptées en crédit caisse, paiement fournisseur séparé des dépenses.
+Date : audit lecture seule (aucune écriture, aucun POST/PUT/DELETE, aucun serveur lancé).
+Périmètre : backend `/home/mimo/fruiterie-app/backend/src/routes/*.ts` + `prisma/schema.prisma`,
+vérifications par GET sur `http://localhost:8080/api` (base de test remplie).
+
+Les 3 bugs déjà corrigés (1 réception = 1 bordereau ; ventes comptant non comptées en crédit
+caisse ; paiement fournisseur séparé des dépenses) ne sont **pas** re-signalés.
 
 ---
 
 ## (a) Résumé exécutif
 
-L'architecture « caisse calculée à la volée, jamais dupliquée » est saine et les garde-fous récents (anti-doublon `sourceType/sourceId`, dû figé sur les lignes de BP, verrou facture PAID) fonctionnent. L'audit met néanmoins en évidence **12 problèmes réels**, dont **2 P0** :
+Le socle est sain : Decimal partout, soft-delete généralisé, transactions Prisma sur toutes les
+mutations sensibles, anti-doublon strict `@@unique([sourceType, sourceId])` en caisse, et
+recalculs « à la volée » côté caisse/bordereau qui évitent les totaux miroirs périmés.
 
-1. **Le module caisse ignore le soft-delete des journées** : la journée `2026-08-02` porte `deletedAt = 2026-08-01T16:34:43Z` et reste malgré tout servie par `GET /days/:date` (avec toutes ses lignes), tout en étant **absente** de `GET /days`. Deux vérités contradictoires pour la même date.
-2. **Le montant réglé d'un bon de paiement n'est pas conservé de façon fiable** : `BP-2026-0017` est `paye` alors que `montantPaye = 0` sur sa ligne, et le bordereau `BF-096461` associé reste à `montantFinalDu = 10192` tout en étant marqué `paye`.
+Cependant l'audit remonte **13 problèmes réels**, dont **3 P0** qui produisent des chiffres faux
+en production :
 
-À cela s'ajoutent des incohérences de cohérence comptable observables directement en API (`totalEntries`/`totalOutputs`/`difference` persistés ≠ recalculés ; `difference` structurellement non nulle), la génération de références séquentielles non concurrente (`max+1` hors verrou) et plusieurs endpoints d'écriture sans contrôle de permission.
+1. **Double comptage des règlements fournisseurs en caisse** : la journée 2026-08-02 affiche
+   10 lignes de sortie pour 5 bons de paiement (les lignes virtuelles et les lignes réelles sont
+   toutes deux envoyées au frontend).
+2. **Le drill-down caisse « règlements fournisseurs » ne correspond pas à l'agrégat** : la somme
+   listée (508 013,75) est correcte mais BP-2026-0016 y apparaît pour 336 000 alors que son
+   `totalAmount` est 168 000 → l'écriture de caisse cumulée n'est jamais décrémentée/corrigée.
+3. **Encaissement supérieur au total facture possible** : la facture F-2026-0030 existe en base
+   avec `total=1`, `paidAmount=200`, `remaining=-199`, statut PAID.
 
-Chiffres marquants relevés en base :
-- `GET /cash-register/days/2026-08-02` → recalculé `totalEntries = 1 279 522`, persisté `1 124 650` ; `difference = 771 508.25` (persisté `616 636.25`).
-- `F-2026-0030` : `total = 1`, `paidAmount = 200`, `remaining = -199`, statut `PAID`.
-- `BF-096461` : `statut = paye`, `montantFinalDu = 10192`, `montantFinalDefinitif = 11200`.
-- Avance `AV-2026-0001` en statut `PENDING`, absent de toute logique de transition métier.
+Les P1 concernent la cohérence bordereau clôturé ↔ montants définitifs (BF-096461 :
+`montantFinalDefinitif=11200` mais `montantFinalDu` recalculé = 10192), la réouverture
+silencieuse d'une journée de caisse clôturée par un paiement fournisseur, et les collisions de
+références après soft-delete pour `AV-` (deux formats coexistent : `AV-2026-0001` et `AV-000001`).
+
+Points forts détaillés en section (c).
 
 ---
 
 ## (b) Problèmes classés
 
-### P0
+### P0 — bloquants (chiffres faux, argent)
 
----
+#### P0-1 — Double affichage des règlements fournisseurs dans la journée de caisse
+**Fichier** : `backend/src/routes/cash-register.routes.ts:438-466` et `:479-480`
 
-#### P0-1 — Journée de caisse soft-deletée toujours servie par le détail et le PDF
-**Fichier** : `backend/src/routes/cash-register.routes.ts:57`, `:185`, `:379`, `:722`, `:1191`
+**Description** : le handler `GET /days/:date` construit une ligne **virtuelle** par
+`CashRegisterEntry` de `sourceType='SUPPLIER_PAYMENT'` (boucle ligne 453-465), puis concatène
+`[...virtuelles, ...reelles]` (ligne 480) où `reelles` contient **déjà ces mêmes
+CashRegisterEntry**. Contrairement à `INVOICE_TOTAL` / `CREDIT_COLLECTION` (qui n'ont aucune
+ligne réelle en base), `SUPPLIER_PAYMENT` est une ligne physique : elle est donc rendue deux fois.
 
-**Description** — Tous les accès à `cashRegisterDay` par date utilisent `findUnique({ where: { date } })` **sans filtrer `deletedAt: null`** (lignes 57, 185, 379, 722, 1191), alors que la liste `GET /days` filtre bien `deletedAt: null` (ligne 359). Une journée soft-deletée est donc invisible dans la liste mais parfaitement lisible, calculable, imprimable en PDF — et `getOrCreateDay` la « ressuscite » silencieusement pour toute nouvelle saisie au lieu d'en créer une neuve.
-
-**Repro (lecture seule)**
-```
-GET /api/cash-register/days                 -> 1 seul jour : 2026-08-05
-GET /api/cash-register/days/2026-08-02      -> day.deletedAt = "2026-08-01T16:34:43.204Z"
-                                               10 sorties + 2 entrées, totaux complets
-```
-
-**Impact** — Une journée « supprimée » continue d'être comptabilisée, imprimée et modifiée. La suppression logique n'a aucun effet métier : perte de confiance sur toute donnée de caisse.
-
-**Suggestion** — Ajouter `deletedAt: null` à toutes les lectures (`findFirst` au lieu de `findUnique`), et dans `getOrCreateDay` traiter une journée soft-deletée comme inexistante (créer une nouvelle ligne ou refuser explicitement).
-
----
-
-#### P0-2 — Bon de paiement `paye` avec `montantPaye = 0` et bordereau `paye` avec un dû résiduel
-**Fichier** : `backend/src/routes/supplier-payments.routes.ts:446-452`, `:514-523`, `:582-591`
-
-**Description** — Le statut du BP est recalculé à partir du **statut des bordereaux** (`resteAPayer = bordereaux dont statut !== 'paye'`, ligne 586) et non à partir des montants réellement réglés. Deux conséquences :
-- la mise à jour de `montantPaye` (ligne 517) est conditionnée par `if (ligneBP)` — si le `findFirst` échoue, le cumul est perdu **sans erreur** ;
-- le bordereau est passé à `paye` dès que `resteFinal <= 0` (ligne 450) alors qu'un `montantFinalDu` résiduel peut subsister s'il a été recalculé entre-temps.
-
-**Repro (lecture seule)**
-```
-GET /api/supplier-payments/<id BP-2026-0017>
-  -> status "paye", lines[0] = { bordereauRef BF-096461, montant 11200, montantPaye "0" }
-GET /api/supplier-bordereaux/<id BF-096461>
-  -> statut "paye", montantFinalDu "10192", montantFinalDefinitif "11200"
-```
-Idem `BP-2026-0014/0015/0016` : tous `paye`, tous `montantPaye = 0`.
-
-**Impact** — Impossible de reconstituer combien a réellement été versé à un fournisseur. Le PDF du bon et la balance fournisseur reposent sur une donnée fausse. Risque de double paiement ou de litige fournisseur.
-
-**Suggestion** — Dériver le statut du BP de `Σ montantPaye vs totalAmount`, rendre `montantPaye` obligatoire (upsert plutôt que `if (ligneBP)`), et refuser le passage à `paye` d'un bordereau dont `montantFinalDu > 0`.
-
----
-
-### P1
-
----
-
-#### P1-1 — Totaux persistés de la journée divergent des totaux recalculés
-**Fichier** : `backend/src/routes/cash-register.routes.ts:264-288` vs `:372-491`
-
-**Description** — `recalculerEtPersister` n'est appelé que lors des saisies manuelles (dépense, appro, remise, clôture). Toute mutation côté facture / paiement client (création, encaissement, changement de statut) **ne déclenche aucun recalcul**. Les colonnes miroir de `CashRegisterDay` dérivent donc en permanence. Par ailleurs `supplierPaymentTotal` n'est délibérément pas persisté (ligne 280) mais **est** inclus dans `totalOutputs` persisté (ligne 283) : la colonne devient non reconstructible depuis les autres colonnes.
-
-**Repro (lecture seule)**
+**Repro (lecture seule)** :
 ```
 GET /api/cash-register/days/2026-08-02
-  day.totalEntries    = 1124650   |  totaux.totalEntries    = 1279522
-  day.invoiceTotal    = 549825    |  totaux.invoiceTotal    = 1254522
-  day.difference      = 616636.25 |  totaux.difference      = 771508.25
-GET /api/cash-register/days        -> 2026-08-05 : totalEntries 0, totalOutputs 2000
-                                      alors que le détail renvoie 0 sorties
+```
+→ `outputs` contient 10 lignes : 5 « Règlement fournisseur — Domaine Saharien Dates »
+(142779 / 16584.75 / 336000 / 11200 / 1450) **et** 5 « Paiement fournisseur » aux mêmes montants.
+`totaux.supplierPaymentTotal = 508013.75` (compté une seule fois, correct), mais la somme des
+lignes affichées vaut 1 016 027,50.
+
+**Impact** : le bordereau de caisse à l'écran affiche le double des sorties fournisseurs ;
+la somme des lignes ne réconcilie plus avec `totalOutputs`. Perte de confiance comptable.
+
+**Suggestion** : ne pas générer les lignes virtuelles `SUPPLIER_PAYMENT`, et enrichir à la place
+la `category` des lignes réelles avec le nom du fournisseur ; ou filtrer
+`reelles = lignes.filter(l => l.sourceType !== 'SUPPLIER_PAYMENT')`.
+
+---
+
+#### P0-2 — L'écriture de caisse d'un bon de paiement n'est jamais corrigée/décrémentée
+**Fichier** : `backend/src/routes/supplier-payments.routes.ts:552-577`
+
+**Description** : sur `POST /:id/pay`, si une écriture `SUPPLIER_PAYMENT` existe déjà pour ce bon,
+le code fait `amount: existante.amount + total` (ligne 560). Aucune route ne décrémente jamais
+cette écriture, et le montant cumulé peut dépasser le `totalAmount` du bon si `/pay` est rappelé
+sur des bordereaux dont le dû a été régénéré entre-temps (correction, ajout de ventes).
+
+**Repro (lecture seule)** :
+```
+GET /api/supplier-payments/cmsb4kwb9000vpw60dew463yf   → BP-2026-0016, totalAmount = 168000
+GET /api/cash-register/days/2026-08-02/supplier-payments → BP-2026-0016, amount = 336000
+```
+Écart de 168 000 DA entre le bon de paiement et la sortie de caisse qu'il a générée.
+
+**Impact** : sortie de caisse surévaluée de 168 000 DA sur une seule journée de test.
+`difference` de la journée est faussée d'autant.
+
+**Suggestion** : recalculer l'écriture à partir de `Σ SupplierPaymentLine.montantPaye` du bon
+(source de vérité) au lieu d'un `+=` aveugle, et ajouter une garde
+`montantCaisse <= totalAmount`.
+
+---
+
+#### P0-3 — Encaissement possible au-delà du total de la facture (données incohérentes en base)
+**Fichier** : `backend/src/routes/payments.routes.ts:140-153` (garde) et
+`backend/src/routes/invoices.routes.ts:573-673` (PATCH)
+
+**Description** : `POST /api/payments` garde bien contre le surpaiement, mais le
+`PATCH /api/invoices/:id` autorise la **réduction du total** d'une facture non-PAID
+(`inv.status === 'PAID'` est le seul verrou, ligne 585) **sans re-vérifier les paiements déjà
+encaissés** et sans rappeler `reconcileInvoice`. On obtient donc un `remaining` négatif.
+
+**Repro (lecture seule)** :
+```
+GET /api/invoices | facture F-2026-0030
+→ {"status":"PAID","total":"1","paidAmount":"200","remaining":"-199"}
 ```
 
-**Impact** — La liste des journées (`GET /days`, qui lit les colonnes) et le détail (recalculé) affichent des montants différents pour le même jour. Les instantanés `CashRegisterClosing` héritent de ces valeurs.
+**Impact** : solde client faux de 199 DA sur cette facture ; `Customer.balance` a été décrémenté
+de 200 alors que la dette n'était que de 1. Généralisable à n'importe quelle facture éditée
+après encaissement partiel.
 
-**Suggestion** — Soit ne plus persister aucun total (source de vérité unique = recalcul + `GET /days` recalculé à la volée), soit recalculer sur tout événement facture/paiement.
+**Suggestion** : dans le PATCH, refuser `nouveauTotal < Σ paiements` (409), et appeler
+`reconcileInvoice(tx, inv.id)` après toute modification du total.
 
 ---
 
-#### P1-2 — Journée `2026-08-05` : `totalOutputs = 2000` sans aucune ligne de sortie
-**Fichier** : `backend/src/routes/cash-register.routes.ts:270-286`
+### P1 — majeurs
 
-**Description** — Résidu direct de P1-1 : une sortie a été persistée puis sa ligne supprimée/soft-deletée sans recalcul. La colonne reste figée.
+#### P1-1 — Bordereau clôturé : montants « définitifs » incohérents avec le recalcul à la volée
+**Fichier** : `backend/src/routes/supplier-bordereaux.routes.ts:165-220` (GET) vs `:428-468` (cloture)
 
-**Repro**
+**Description** : la clôture fige `commissionDefinitive` / `montantFinalDefinitif`, mais le
+`GET /:id` renvoie **toujours** un `montantFinalDu` recalculé à la volée depuis les InvoiceItem,
+sans tenir compte du figé. Les deux valeurs divergent dès qu'un paiement a décrémenté
+`montantFinalDu` en base (`supplier-payments.routes.ts:446-452`).
+
+**Repro (lecture seule)** :
 ```
-GET /api/cash-register/days/2026-08-05
-  day.totalOutputs = "2000", day.difference = "-2000"
-  outputs = [], entries = []   (totaux recalculés : tout à 0)
+GET /api/supplier-bordereaux/cmsb4s45e0023pw604n2bjypy   (BF-096461, statut "paye")
+→ montantFinalDu (recalculé) = 10192   |   montantFinalDefinitif = 11200
+→ le champ persisté en base vaut 0 (visible via GET /api/supplier-bordereaux)
+```
+Trois valeurs différentes pour le même concept sur un bordereau soldé.
+
+**Impact** : impossible de savoir ce qui reste dû ; le PDF bordereau (`:556`) imprime la valeur
+recalculée, donc un bordereau intégralement payé s'imprime avec 10 192 DA de dû.
+
+**Suggestion** : quand `statut ∈ {cloture, partiellement_paye, paye}`, le GET et le PDF doivent
+renvoyer la valeur **persistée** `montantFinalDu` (reste réel) et n'utiliser le recalcul que pour
+les bordereaux `ouvert` / `pret_a_cloturer`.
+
+---
+
+#### P1-2 — Un paiement fournisseur CASH réouvre silencieusement une journée de caisse clôturée
+**Fichier** : `backend/src/routes/supplier-payments.routes.ts:528-549`
+
+**Description** : si la journée cible est `cloturee`, le code la repasse à `ouverte` et efface
+`closedBy`/`closedAt`, alors que toutes les autres saisies (dépense, appro, remise) refusent
+avec un 409 (`cash-register.routes.ts:798-802`, `:949-953`, `:1034-1038`). L'instantané
+`CashRegisterClosing` existant, lui, n'est pas invalidé.
+
+**Repro (lecture seule)** : lire le code ci-dessus + constater qu'aucun log métier n'est visible
+par l'utilisateur (`CashRegisterAuditLog` action `reouverture` seulement, non exposé par une
+route GET — voir P2-4).
+
+**Impact** : une clôture comptable validée peut être annulée sans aucune trace visible pour
+l'exploitant ; les totaux du jour changent après signature du bordereau papier.
+
+**Suggestion** : refuser (409) comme les autres saisies et exiger une réouverture explicite, ou
+au minimum créer une nouvelle `CashRegisterClosing` et remonter un avertissement dans la réponse.
+
+---
+
+#### P1-3 — Collisions / incohérence de références après soft-delete (`AV-`)
+**Fichier** : `backend/src/routes/supplier-receptions.routes.ts:155-163` et `:700-706` vs
+`backend/src/routes/supplier-advances.routes.ts:108-120`
+
+**Description** : trois générateurs de référence d'avance coexistent avec des formats
+incompatibles :
+- `supplier-advances.routes.ts` → `AV-2026-0001` (séquence annuelle, regex `^AV-\d{4}-(\d+)$`)
+- `supplier-receptions.routes.ts` POST (`nextRef`) → `AV-000001` (regex `(\d+)\s*$` sur **toutes**
+  les références, y compris `AV-2026-0001` dont elle extrait `0001`)
+- `supplier-receptions.routes.ts` PATCH (`:706`) → `AV-000001` idem
+
+La regex `(\d+)\s*$` appliquée à `AV-2026-0007` renvoie 7, pas 20260007. Deux formats en base
+suffisent donc à faire retomber le compteur sur une référence existante → `P2002` sur
+`reference @unique`, y compris contre une avance **soft-deleted** (la contrainte unique
+s'applique aux lignes `deletedAt != null`).
+
+**Repro (lecture seule)** :
+```
+GET /api/supplier-advances
+→ "AV-2026-0001" (format A) et "AV-TEST-BP1" (format libre) cohabitent déjà
+```
+Le prochain `nextRef('supplierAdvance', …)` calcule max=1 depuis `AV-2026-0001` et proposera
+`AV-000002`. Une réception ultérieure retombera sur la même valeur si `AV-000002` a été
+soft-deleted par le PATCH (`:688`).
+
+**Impact** : 500 « Erreur création réception » non explicite au moment d'enregistrer une
+marchandise avec avance ; blocage terrain.
+
+**Suggestion** : un seul helper de référence partagé, format unique, regex ancrée sur le préfixe
+exact, et boucle de retry sur `P2002`.
+
+---
+
+#### P1-4 — `POST /:id/pay` ne borne pas le règlement au montant du bon de paiement
+**Fichier** : `backend/src/routes/supplier-payments.routes.ts:328-411`
+
+**Description** : la validation contrôle ligne par ligne `montant <= bordereau.montantFinalDu`,
+mais jamais `Σ montantPaye <= SupplierPaymentLine.montant` ni
+`Σ montantPaye <= SupplierPayment.totalAmount`. Le bon n'est donc pas un plafond : si le dû du
+bordereau remonte (correction via `/correct`, nouvelle facture sur le lot), on peut régler via ce
+bon plus que ce qu'il autorise. C'est le mécanisme qui a produit P0-2.
+
+**Repro (lecture seule)** : BP-2026-0016 — `totalAmount=168000`, ligne
+`montant=168000, montantDuAvant=336000`, mais la caisse porte 336 000 pour ce bon.
+
+**Impact** : dépassement du bon signé ; incohérence bon ↔ caisse ↔ solde fournisseur.
+
+**Suggestion** : ajouter la garde
+`D(ligneBP.montantPaye ?? 0).plus(montant) <= D(ligneBP.montant)` avant écriture.
+
+---
+
+#### P1-5 — `montantPaye` des lignes de bon reste à 0 sur des bons soldés
+**Fichier** : `backend/src/routes/supplier-payments.routes.ts:513-523` et `:704-714` (PDF)
+
+**Description** : `montantPaye` n'est incrémenté que si `findFirst` retrouve la ligne
+`(paymentId, bordereauId)`. Sur les données de test, des bons `status='paye'` conservent
+`montantPaye = 0`.
+
+**Repro (lecture seule)** :
+```
+GET /api/supplier-payments/cmsb4kwb9000vpw60dew463yf
+→ status "paye", lines[0].montant "168000", lines[0].montantPaye "0", reste "0"
 ```
 
-**Impact** — Journée du jour affichée en écart de caisse de −2 000 DA fantôme dans la liste.
+**Impact** : le PDF « bon de paiement » (`:710-712`) imprime `montantPaye = 0.00` et
+`reste = montantDuAvant − 0 = 336000.00` sur un bon **entièrement réglé**. Document remis au
+fournisseur totalement faux.
 
-**Suggestion** — Recalcul systématique + script de réconciliation ponctuel.
+**Suggestion** : dériver `montantPaye` de `montantDuAvant − bordereau.montantFinalDu` en lecture,
+ou fiabiliser l'incrément (contrainte unique `(paymentId, bordereauId)` sur `SupplierPaymentLine`).
 
 ---
 
-#### P1-3 — `difference` n'est pas un écart de caisse mais un solde structurellement non nul
-**Fichier** : `backend/src/routes/cash-register.routes.ts:228-241`, `:258`
+#### P1-6 — Double sortie de stock potentielle : `POST /api/invoices` crée un StockMovement OUT en plus de celui de `confirmSale`
+**Fichier** : `backend/src/routes/invoices.routes.ts:416-429` vs
+`backend/src/routes/sales.routes.ts:611-625`
 
-**Description** — `totalEntries` agrège **la totalité du chiffre d'affaires facturé** (`invoiceTotal`), y compris les ventes non encaissées, tandis que `totalOutputs` ne déduit que `creditInvoiceTotal`. Tant que le fonds de clôture n'est pas saisi, `difference = encaissements + fonds d'ouverture`, soit un très gros nombre positif présenté comme « différence ».
+**Description** : la création de facture crée un `StockMovement` `OUT` de `colis` par ligne liée à
+un lot, avec le commentaire « tracage uniquement ». Or `confirmSale` a déjà créé un `OUT` pour la
+même marchandise. `remainingQuantity` n'est décrémenté qu'une fois (correct), mais le **journal
+des mouvements** compte double.
 
-**Repro**
+**Repro (lecture seule)** : lecture croisée du code — `sales.routes.ts:612-625` crée un `OUT`
+avec `reference = sale.reference` (`V-…`) puis `invoices.routes.ts:418-429` crée un second `OUT`
+avec `reference = created.reference` (`F-…`) et la même quantité (`colis`) sur le même `lotId`.
+Non vérifiable par API : **aucune route ne liste les `StockMovement`** (voir P3-3), ce qui masque
+justement ce doublon.
+
+**Impact** : tout état de stock reconstruit depuis les mouvements (inventaire théorique, export
+comptable, contrôle d'écart) donne une sortie double et un stock négatif.
+
+**Suggestion** : ne pas créer de `StockMovement` à la facturation (le lien facture↔lot est déjà
+porté par `InvoiceItem.lotId`), ou introduire un `type` distinct non comptabilisé
+(ex. `TRACE`) exclu des agrégats.
+
+---
+
+### P2 — modérés
+
+#### P2-1 — Incohérence `totalEntries` / `totalOutputs` / `difference` : le fonds d'ouverture est compté en entrée mais pas en sortie
+**Fichier** : `backend/src/routes/cash-register.routes.ts:228-241`
+
+**Description** : `totalEntries` inclut `openingCashFund`, et `totalOutputs` inclut
+`closingCashFund` **uniquement si la journée a été clôturée** (la ligne `CLOSING_FUND` n'existe
+qu'après clôture). Sur une journée ouverte, `difference = totalEntries − totalOutputs` inclut donc
+l'ancien fonds sans contrepartie et ne représente ni un écart de caisse ni un solde.
+
+**Repro (lecture seule)** :
 ```
-GET /api/cash-register/days/2026-08-02 -> difference = 771508.25
+GET /api/cash-register/days/2026-08-02
+→ openingCashFund 25000, totalEntries 1279522, totalOutputs 508013.75,
+  difference 771508.25
 ```
+`difference` est en réalité « espèces théoriques en tiroir », pas un écart. Une journée sans
+aucune activité mais avec un fonds de 25 000 affiche `difference = 25000`.
 
-**Impact** — Le champ le plus regardé du bordereau de caisse (et du PDF, ligne 745) est illisible : un caissier ne peut pas savoir s'il manque de l'argent. Un vrai manquant de 5 000 DA est noyé.
-
-**Suggestion** — Renommer/scinder : `soldeTheoriqueEspeces` (fonds + encaissements réels − sorties réelles) et `ecartCaisse` (théorique − fonds de clôture compté). Ne comparer que des flux d'espèces.
-
----
-
-#### P1-4 — Un règlement fournisseur CASH rouvre automatiquement une journée clôturée
-**Fichier** : `backend/src/routes/supplier-payments.routes.ts:529-549`
-
-**Description** — Toutes les saisies de caisse refusent une journée `cloturee` avec un 409 (`cash-register.routes.ts:798`, `:949`, `:1034`, `:1124`). Le paiement fournisseur, lui, **remet la journée à `ouverte`** (`closedBy: null`, `closedAt: null`) sans demander confirmation, et l'échec de l'audit est avalé par un `catch {}` (ligne 546).
-
-**Repro (lecture seule)** — `supplier-payments.routes.ts:529-533` ; comparer avec `cash-register.routes.ts:798-802`.
-
-**Impact** — La clôture n'est pas un verrou. L'instantané `CashRegisterClosing` de la journée devient obsolète (il n'est jamais mis à jour), et si l'audit échoue la réouverture est invisible.
-
-**Suggestion** — Refuser (409) et exiger une réouverture explicite tracée, ou au minimum invalider/versionner le `CashRegisterClosing` correspondant. Ne jamais avaler l'écriture d'audit.
-
----
-
-#### P1-5 — Modifier une facture après encaissement produit un `remaining` négatif
-**Fichier** : `backend/src/routes/invoices.routes.ts:585-587`, `:654-663` ; `payments.routes.ts:65-79`
-
-**Description** — Le verrou ne porte que sur `status === 'PAID'`. Une facture `PARTIALLY_PAID` peut voir son total **diminué** en dessous du montant déjà encaissé ; `reconcileInvoice` n'est pas rappelé après un `PATCH` de facture, donc le statut ne redevient pas cohérent et aucun avoir n'est généré.
-
-**Repro (lecture seule)**
+Cas plus visible en base :
 ```
-GET /api/invoices?take=100 -> F-2026-0030 : total 1, paidAmount 200, remaining -199, status PAID
+GET /api/cash-register/days → journée 2026-08-05 : totalEntries "0", totalOutputs "2000",
+   difference "-2000"
+GET /api/cash-register/days/2026-08-05 → totaux recalculés : tout à "0"
 ```
+→ les **totaux miroirs persistés divergent du recalcul à la volée** (voir aussi P2-2).
 
-**Impact** — Restant dû négatif, trop-perçu invisible, `creditInvoiceTotal` de la caisse faussé.
+**Impact** : le libellé « écart » du bordereau induit en erreur ; un écart réel de caisse est
+noyé dans le fonds de roulement.
 
-**Suggestion** — Interdire un total inférieur au déjà encaissé (400), appeler `reconcileInvoice` en fin de `PATCH`, et matérialiser tout excédent en avoir client.
-
----
-
-#### P1-6 — Génération de références séquentielles non atomique (collisions sous concurrence)
-**Fichier** : `cash-register.routes.ts:68-85` · `supplier-payments.routes.ts:39-52`, `:55-68` · `supplier-advances.routes.ts:106-120` · `supplier-receptions.routes.ts:155-163` · `invoices.routes.ts:110-123` · `sales.routes.ts:165-178` · `products.routes.ts:66-79`
-
-**Description** — Sept implémentations distinctes du même pattern « lire toutes les références → `max+1` », toutes **hors verrou** (pas de séquence Postgres, pas de `SELECT ... FOR UPDATE`, pas de retry sur `P2002`). Deux créations simultanées calculent le même numéro. Variante aggravante dans `invoices`/`sales`/`products` : le tri `ORDER BY reference DESC LIMIT 1` est **lexicographique** — dès qu'on dépasse 9999 (`F-2026-10000`), `F-2026-9999` reste le maximum et la référence suivante est un doublon garanti.
-
-**Repro (lecture seule)** — Lire `invoices.routes.ts:113-116` : `ORDER BY "reference" DESC LIMIT 1` sur une chaîne. `9999 > 10000` en tri texte.
-
-**Impact** — Erreur 500 opaque sur contrainte unique en pic d'activité ; blocage total de la facturation après 9 999 pièces annuelles.
-
-**Suggestion** — Factoriser dans un helper unique s'appuyant sur une séquence Postgres (ou une table de compteurs verrouillée), avec retry sur `P2002`.
+**Suggestion** : renommer en `soldeTheorique` et exposer un vrai `ecart` séparé
+(= comptage physique − solde théorique), ou exclure `openingCashFund` de `totalEntries`.
 
 ---
 
-#### P1-7 — Endpoints bordereaux et caisse sans contrôle de permission
-**Fichier** : `supplier-bordereaux.routes.ts:27-28`, `:231`, `:347`, `:384`, `:428`, `:477` · `cash-register.routes.ts:22`, `:786`, `:1103` · `supplier-payments.routes.ts` (tous)
+#### P2-2 — Totaux miroirs `CashRegisterDay` jamais réconciliés → valeurs fantômes
+**Fichier** : `backend/src/routes/cash-register.routes.ts:264-288` et `:356-366`
 
-**Description** — Ces routeurs ne posent que `router.use(requireAuth)`. Aucun `requirePermission(...)`, contrairement à `payments.routes.ts`, `invoices.routes.ts` et `supplier-advances.routes.ts` qui protègent chaque mutation. Un simple utilisateur authentifié (rôle CAISSIER ou VENDEUR) peut donc clôturer un bordereau, le corriger, affecter des avances, clôturer la caisse et créer des bons de paiement.
+**Description** : `GET /days` (liste) renvoie les colonnes **persistées**, alors que
+`GET /days/:date` (détail) renvoie le **recalcul**. Rien ne resynchronise les miroirs si une
+`CashRegisterEntry` est soft-deletée ou si une facture est annulée hors du flux caisse.
 
-**Repro (lecture seule)** — `search_files "requirePermission" backend/src/routes/supplier-bordereaux.routes.ts` → 0 occurrence ; idem `cash-register.routes.ts`, `supplier-payments.routes.ts`.
-
-**Impact** — Escalade fonctionnelle : les opérations financières les plus sensibles (clôture, correction, règlement) sont ouvertes à tout compte.
-
-**Suggestion** — Ajouter `requirePermission('CASH_WRITE' | 'PURCHASE_WRITE' | 'BORDEREAU_CLOSE')` sur chaque mutation, en s'alignant sur le modèle de `payments.routes.ts`.
-
----
-
-### P2
-
----
-
-#### P2-1 — Bordereau clôturé : la porte de derrière `/correct` est sans limite
-**Fichier** : `supplier-bordereaux.routes.ts:477-537` (notamment `:485`, `:521-525`)
-
-**Description** — `PATCH /:id` refuse correctement un bordereau `cloture` (ligne 240) — bon réflexe. Mais `PATCH /:id/correct` ne vérifie **aucun statut** : il accepte un bordereau `ouvert`, `paye` ou `annule` aussi bien que `cloture`, et réécrit `commissionDefinitive` / `avancesDefinitives` / `montantFinalDefinitif` (lignes 521-525). Pire, il permet de fixer `avancesAffectees` à une valeur arbitraire **sans toucher aux `SupplierAdvanceAllocation`** correspondantes.
-
-**Repro (lecture seule)** — Comparer `supplier-bordereaux.routes.ts:240-242` (blocage) avec `:485-489` (aucun blocage).
-
-**Impact** — Les montants « définitifs » d'un bordereau clôturé, voire déjà payé, sont modifiables ; désynchronisation garantie entre `avancesAffectees` et la somme des allocations.
-
-**Suggestion** — Restreindre `/correct` au statut `cloture` (et refuser `paye`), recalculer `avancesAffectees` depuis les allocations plutôt que l'accepter en entrée, et exiger une permission dédiée.
-
----
-
-#### P2-2 — `avancesAffectees` du bordereau : compteur dénormalisé sans réconciliation
-**Fichier** : `supplier-bordereaux.routes.ts:329`, `:405`, `:517` ; `supplier-payments.routes.ts:472-500`
-
-**Description** — `avancesAffectees` est incrémenté/décrémenté à la main lors des allocations, mais **jamais recalculé** depuis `SupplierAdvanceAllocation`. Il existe au moins trois chemins d'écriture (allocation bordereau, désallocation, `/correct`) plus la consommation d'avances du mode `ENCAISSER` dans `supplier-payments`, qui met à jour `SupplierAdvance.allocatedAmount` **sans** répercuter sur `avancesAffectees` du bordereau réglé.
-
-**Repro (lecture seule)** — `supplier-payments.routes.ts:472-500` : boucle sur le pool d'avances, écrit `allocatedAmount`/`status` de l'avance, aucune écriture sur `supplierBordereau.avancesAffectees`.
-
-**Impact** — `montantFinalDu` calculé à partir d'un montant d'avances faux ; l'avance est consommée deux fois du point de vue du fournisseur.
-
-**Suggestion** — Une seule fonction `recalcAvancesAffectees(bordereauId)` = `Σ allocations non supprimées`, appelée sur tous les chemins.
-
----
-
-#### P2-3 — Statut d'avance `PENDING` orphelin
-**Fichier** : `prisma/schema.prisma:34-41` ; `supplier-advances.routes.ts:284-295`, `:489-495`
-
-**Description** — L'enum `AdvanceStatus` contient `PENDING`, mais aucune route ne le produit ni ne le gère : `advanceStatusFor` (bordereaux) ne renvoie que 3 valeurs, `ADVANCE_STATUS_FR` et `FR_TO_ENUM` l'ignorent, et la sélection des avances allouables filtre sur `['DISPONIBLE','PARTIALLY_ALLOCATED']` (`supplier-payments.routes.ts:420`).
-
-**Repro (lecture seule)**
+**Repro (lecture seule)** :
 ```
-GET /api/supplier-advances -> AV-2026-0001 : status "PENDING", amount 50000, allocated 0
+GET /api/cash-register/days           → 2026-08-05 : totalOutputs "2000", difference "-2000"
+GET /api/cash-register/days/2026-08-05 → totaux.totalOutputs "0", difference "0"
 ```
-Cette avance de 50 000 DA est donc **invisible** pour tout règlement en mode `ENCAISSER` et s'affiche sans libellé FR.
+Deux écrans de la même application affichent deux montants différents pour la même journée.
 
-**Impact** — Trésorerie fournisseur bloquée sans message d'erreur explicite ; libellé brut affiché à l'utilisateur.
+**Impact** : la liste des journées (écran de synthèse mensuel) affiche des sorties inexistantes.
 
-**Suggestion** — Soit supprimer `PENDING` de l'enum, soit le documenter et l'intégrer aux filtres et aux mappings FR.
-
----
-
-#### P2-4 — `getSalesLinesForBordereau` inclut les factures `DRAFT` et `CANCELLED`
-**Fichier** : `supplier-bordereaux.routes.ts:58-66`
-
-**Description** — La requête filtre `lotId` + `deletedAt: null` sur `InvoiceItem` mais **jamais le statut de la facture parente**. Une facture brouillon ou annulée gonfle donc `totalBrutVentes`, la commission et le `montantFinalDu` du fournisseur — alors que le module caisse, lui, exclut explicitement `DRAFT` et `CANCELLED` (`cash-register.routes.ts:28`).
-
-**Repro (lecture seule)** — `F-2026-0032` est en `DRAFT` avec un total de 200 DA ; ses lignes restent éligibles au calcul de bordereau. Comparer `supplier-bordereaux.routes.ts:59` (aucun filtre statut) et `cash-register.routes.ts:124`.
-
-**Impact** — Le fournisseur est crédité de ventes qui n'existent pas. Écart direct entre le chiffre d'affaires caisse et le total brut des bordereaux.
-
-**Suggestion** — Ajouter `invoice: { status: { notIn: ['DRAFT','CANCELLED'] }, deletedAt: null }` au `where`.
+**Suggestion** : faire dériver la liste du même `calculerTotauxJour` (ou déclencher
+`recalculerEtPersister` sur lecture de liste), et ajouter un job/route de réconciliation.
 
 ---
 
-### P3
+#### P2-3 — Facture PARTIALLY_PAID : le total complet est traité comme « vente à crédit »
+**Fichier** : `backend/src/routes/cash-register.routes.ts:151-162` et `:427-437`
+
+**Description** : une facture `PARTIALLY_PAID` est ajoutée **intégralement** à
+`creditInvoiceTotal` (ligne 155-157), donc entièrement déduite des entrées via `totalOutputs`,
+alors qu'une partie a bien été encaissée en espèces le jour même. Le reliquat réel
+(`unpaidPartialInvoiceTotal`) est calculé mais volontairement exclu de `totalOutputs` (`:233-235`)
+et affiché comme ligne `deduction: true`.
+
+Conséquence arithmétique : pour une facture de 10 000 dont 6 000 encaissés cash le jour même,
+`invoiceTotal += 10000` (entrée) et `creditInvoiceTotal += 10000` (déduction) →
+contribution nette **0**, alors que 6 000 DA sont physiquement dans le tiroir.
+
+**Repro (lecture seule)** : aucune facture PARTIALLY_PAID en base de test actuellement
+(`GET /api/invoices` → uniquement PAID et DRAFT), le bug est donc latent mais certain à la
+lecture du code.
+
+**Impact** : sous-évaluation du cash réel du jour à hauteur du montant partiellement encaissé ;
+`encaissementReelVentes` (`:259`) vaut 0 pour ces factures.
+
+**Suggestion** : `creditInvoiceTotal += (total − encaisse)` pour les `PARTIALLY_PAID` (le reste
+dû), et supprimer la ligne virtuelle `UNPAID_PARTIAL` devenue redondante.
 
 ---
 
-#### P3-1 — Deux définitions de « jour » incompatibles (UTC vs heure locale)
-**Fichier** : `cash-register.routes.ts:31-34` (UTC strict) vs `supplier-payments.routes.ts:32-36` (`setHours(0,0,0,0)` local)
+#### P2-4 — Journal d'audit caisse écrit mais jamais consultable
+**Fichier** : `backend/src/routes/cash-register.routes.ts` (aucune route `GET /audit`),
+modèle `CashRegisterAuditLog` (`prisma/schema.prisma:1267-1277`)
 
-**Description** — Le module caisse normalise les dates en UTC ; le module paiement fournisseur utilise le fuseau local du process. Le serveur tourne actuellement en UTC (`TZ` non défini), ce qui masque le bug — dès un déploiement en `Africa/Algiers` (UTC+1), un règlement fournisseur enregistré avant 01:00 sera rattaché à la journée de caisse de la veille.
+**Description** : les actions `creation`, `annulation`, `cloture`, `reouverture` sont écrites,
+mais aucune route ne les expose. Le rôle « traçabilité comptable » du module est donc inopérant.
 
-**Repro (lecture seule)** — `node -e "console.log(Intl.DateTimeFormat().resolvedOptions().timeZone)"` → `UTC` ; comparer les deux fonctions `jour()`.
+**Repro (lecture seule)** : `grep "cashRegisterAuditLog.findMany"` → 0 occurrence ;
+aucun endpoint `GET` correspondant dans `index.ts`.
 
-**Impact** — Bombe à retardement : décalage d'une journée sur les règlements en début de matinée après changement de fuseau.
+**Impact** : impossible de justifier une réouverture (cf. P1-2) ou une annulation de dépense lors
+d'un contrôle.
 
-**Suggestion** — Un seul helper `jour()` exporté et importé partout, et fixer `TZ` explicitement au démarrage.
+**Suggestion** : ajouter `GET /api/cash-register/days/:date/audit` (et un filtre global paginé).
 
 ---
 
-#### P3-2 — Le PDF de caisse regroupe les règlements fournisseurs dans « LES DEPENSES »
-**Fichier** : `cash-register.routes.ts:739`
+#### P2-5 — Clôture de bordereau : garde basée sur un `colisVendus` non fiable, pertes ignorées
+**Fichier** : `backend/src/routes/supplier-bordereaux.routes.ts:433-435`
 
-**Description** — Choix assumé et commenté, mais il crée un troisième affichage du même chiffre : l'UI sépare `expenseTotal` et `supplierPaymentTotal`, le PDF les additionne. Un rapprochement entre l'écran et le papier est impossible sans connaître la règle.
+**Description** : la clôture exige `colisVendus >= colisRecus`. Or `colisVendus` est un compteur
+incrémenté à la création de facture (`invoices.routes.ts:392`) et **jamais décrémenté** si une
+facture est modifiée (PATCH recrée les lignes) ou soft-deletée. Par ailleurs les pertes (`Loss`)
+sont soustraites de `colisRestant` (`:200-205`) mais **pas** prises en compte dans la garde de
+clôture : un bordereau dont tout le stock restant est parti en perte ne peut jamais être clôturé.
 
-**Repro (lecture seule)** — Sur `2026-08-02` : `expenseTotal = 0`, `supplierPaymentTotal = 508 013.75` → le PDF imprime `508 013.75` en « dépenses ».
+**Repro (lecture seule)** :
+```
+GET /api/supplier-bordereaux/cmsbvhtca001dr66uoir86f27  (BF-096464)
+→ colisRecus 10, colisVendus 10, colisRestant 0, totalPertesColis 0, statut "pret_a_cloturer"
+```
+Le cas nominal passe ; avec 8 vendus + 2 perdus, `colisVendus(8) < colisRecus(10)` → clôture
+refusée à tort.
 
-**Impact** — Confusion documentaire ; risque de double saisie comptable.
+**Impact** : bordereaux bloqués en `ouvert`, donc non payables (`STATUTS_PAYABLES`), donc
+fournisseur non réglé.
 
-**Suggestion** — Afficher deux lignes distinctes dans le PDF (« Frais d'exploitation » / « Règlements fournisseurs ») avec un sous-total.
+**Suggestion** : garde `colisVendus + totalPertesColis >= colisRecus`, et recalculer
+`colisVendus` depuis les `InvoiceItem` plutôt que par incrément.
+
+---
+
+#### P2-6 — Le statut `PENDING` d'une avance la rend invisible au règlement `ENCAISSER`
+**Fichier** : `backend/src/routes/supplier-payments.routes.ts:416-423` vs enum
+`AdvanceStatus` (`prisma/schema.prisma:34-41`)
+
+**Description** : le pool FIFO ne sélectionne que `status ∈ {DISPONIBLE, PARTIALLY_ALLOCATED}`.
+L'enum contient aussi `PENDING`, et la base de test en contient une de 50 000 DA
+avec `allocatedAmount=0` — donc parfaitement disponible mais invisible.
+
+**Repro (lecture seule)** :
+```
+GET /api/supplier-advances
+→ AV-2026-0001 : amount 50000, allocatedAmount 0, status "PENDING"
+```
+Un `POST /:id/pay` en mode ENCAISSER sur ce fournisseur répondrait
+« Avance insuffisante : disponible 0.00 DA » malgré 50 000 DA réellement disponibles.
+
+**Impact** : imputation d'avance impossible ; l'utilisateur croit l'avance perdue.
+
+**Suggestion** : inclure `PENDING` dans le filtre, ou supprimer ce statut de l'enum et migrer les
+lignes existantes vers `DISPONIBLE`.
+
+---
+
+### P3 — mineurs
+
+#### P3-1 — Le mode `ENCAISSER` ne décrémente pas les avances côté bordereau (`avancesAffectees`)
+**Fichier** : `backend/src/routes/supplier-payments.routes.ts:470-503`
+
+**Description** : l'imputation FIFO crée bien des `SupplierAdvanceAllocation` avec `bordereauId`,
+et met à jour `SupplierAdvance.allocatedAmount`, mais **ne met pas à jour**
+`SupplierBordereau.avancesAffectees` — contrairement à `allocateAdvance()`
+(`supplier-bordereaux.routes.ts:329-339`) qui, elle, le fait. Deux chemins d'allocation,
+deux comportements.
+
+**Impact** : le PDF bordereau et le détail affichent `avancesAffectees = 0` alors que des avances
+ont été imputées ; le recalcul `montantFinalDu` du GET ne les déduit pas → dû surévalué.
+
+**Suggestion** : factoriser l'allocation dans un helper unique appelé par les deux routes.
+
+---
+
+#### P3-2 — `nextRef` / `nextInvoiceReference` : scans complets + tri lexicographique, sujets aux races
+**Fichier** : `cash-register.routes.ts:68-85`, `supplier-payments.routes.ts:39-68`,
+`supplier-advances.routes.ts:108-120`, `invoices.routes.ts:110-123`
+
+**Description** : quatre implémentations qui chargent **toutes** les références correspondantes en
+mémoire (`findMany` sans `take`) pour un `max()` applicatif. `nextInvoiceReference` utilise en plus
+`ORDER BY "reference" DESC LIMIT 1`, un tri **lexicographique** : au passage de `F-2026-0009` à
+`F-2026-0010` ça reste correct sur 4 chiffres, mais `F-2026-10000` casserait la séquence. Aucune
+de ces fonctions n'est protégée contre deux requêtes concurrentes (pas de `SELECT … FOR UPDATE`,
+pas de séquence Postgres).
+
+**Impact** : dégradation linéaire des performances ; `P2002` sporadiques en usage multi-poste.
+
+**Suggestion** : séquences Postgres dédiées, ou une table `Counter` verrouillée, avec retry.
+
+---
+
+#### P3-3 — Aucune route de consultation des mouvements de stock
+**Fichier** : `backend/src/routes/stock.routes.ts` (routes : `GET /`, `GET /fifo`, `POST /loss`)
+
+**Description** : le modèle `StockMovement` est écrit par les réceptions, ventes et factures, mais
+n'est exposé par aucun endpoint. Impossible d'auditer les entrées/sorties, ce qui masque P1-6.
+
+**Repro (lecture seule)** : `GET /api/stock/movements` → `{"error":"Route introuvable"}`.
+
+**Impact** : pas de traçabilité stock côté utilisateur ni côté support.
+
+**Suggestion** : ajouter `GET /api/stock/movements` (filtres `lotId`, `productId`, `type`, dates,
+pagination).
+
+---
+
+#### P3-4 — Nom du fournisseur non filtré sur le soft-delete dans le drill-down caisse
+**Fichier** : `backend/src/routes/cash-register.routes.ts:441-452`
+
+**Description** : la requête d'affichage (`prisma.supplierPayment.findMany`) omet
+`deletedAt: null`, contrairement à la route de drill-down `:689-692` qui, elle, le filtre. Le même
+écran peut donc afficher un fournisseur dans la ligne virtuelle et « — » dans la liste détaillée.
+
+**Impact** : incohérence d'affichage mineure entre synthèse et détail.
+
+**Suggestion** : uniformiser en ajoutant `deletedAt: null`.
+
+---
+
+#### P3-5 — Bug de fuseau : `jour()` en UTC côté caisse, en heure locale côté paiements fournisseurs
+**Fichier** : `cash-register.routes.ts:31-34` (`Date.UTC`) vs
+`supplier-payments.routes.ts:32-36` (`d.setHours(0,0,0,0)`)
+
+**Description** : deux normalisations de date différentes pour la même notion de « journée ». Sur
+un serveur en UTC+1 (Algérie), `jour('2026-08-02')` vaut `2026-08-02T00:00:00Z` côté caisse et
+`2026-08-01T23:00:00Z` côté paiement fournisseur.
+
+**Impact** : `getOrCreateDay` peut créer une seconde `CashRegisterDay` pour la veille, et
+l'écriture `SUPPLIER_PAYMENT` se rattache alors au mauvais jour. Non reproductible sur ce serveur
+(TZ=UTC) mais certain en déploiement local.
+
+**Suggestion** : exporter et réutiliser la fonction `jour()` de `cash-register.routes.ts` partout.
 
 ---
 
 ## (c) Points forts
 
-- **Séparation lecture/écriture de la caisse** : les factures et paiements ne sont jamais dupliqués en `CashRegisterEntry`, ils sont agrégés à la volée. Le principe est explicitement documenté en tête de fichier (`cash-register.routes.ts:1-12`) et respecté.
-- **Anti-doublon strict** via `@@unique([sourceType, sourceId])` et le helper `assertPasDeDoublon` (`:338-351`), systématiquement appelé avant chaque insertion de ligne.
-- **Arithmétique 100 % `Prisma.Decimal`** : aucune opération en float sur les montants, `toDecimalPlaces(2)` appliqué aux résultats. Aucune erreur d'arrondi détectée sur les 7 bordereaux et 15 factures inspectés.
-- **Annulation par écriture inverse** plutôt que suppression : une dépense annulée crée une entrée compensatoire et passe `status='annulee'` (`:873-920`), ce qui préserve la piste d'audit.
-- **Dû figé sur les lignes de bon de paiement** (`montantDuAvant`, `supplier-payments.routes.ts:272`) — la bonne intention comptable est là, il ne manque que la fiabilisation de `montantPaye` (cf. P0-2).
-- **Verrous métier explicites et bien nommés** : facture `PAID` non modifiable, surpaiement fournisseur interdit, encaissement supérieur au restant dû refusé, avance d'un autre fournisseur rejetée.
-- **Cohérence agrégat/drill-down** : `GET /days/:date/credit-sales` réplique exactement le prédicat de `creditInvoiceTotal` (`:640-642`), avec un commentaire expliquant pourquoi — bonne pratique à généraliser.
-- **Traçabilité** : `CashRegisterAuditLog`, `SupplierBordereauCorrection` (motif obligatoire) et `auditLog()` couvrent les opérations sensibles.
-- **Commentaires de régression** : les bugs corrigés sont documentés en clair à l'endroit du code concerné, ce qui empêche efficacement les régressions.
+- **Argent en `Decimal` partout** — aucun `float`/`parseFloat` sur des montants, dans le schéma
+  Prisma (`Decimal(14,2)`) comme dans les calculs (`Prisma.Decimal`, `.toDecimalPlaces(2)`).
+- **Transactions systématiques** : toutes les mutations multi-tables passent par
+  `prisma.$transaction` (réception → lot → bordereau → mouvement → avance en un seul bloc).
+- **Anti-doublon caisse solide** : `@@unique([sourceType, sourceId])` + helper
+  `assertPasDeDoublon()` appelé avant chaque insertion — un design qui empêche structurellement
+  la double comptabilisation d'une dépense/appro/remise.
+- **Séparation lecture-seule des modules métier en caisse** : les factures et paiements ne sont
+  jamais dupliqués en `CashRegisterEntry`, ils sont agrégés à la volée. C'est le bon choix
+  d'architecture, bien documenté en tête de fichier.
+- **Soft-delete généralisé** (`deletedAt`) avec filtrage cohérent `deletedAt: null` dans la très
+  grande majorité des requêtes, et annulations par écriture inverse plutôt que par suppression
+  (`PATCH /expenses/:id/cancel`).
+- **Gardes métier explicites et bien nommées** : surpaiement fournisseur interdit, encaissement
+  client > restant dû refusé, facture PAID verrouillée en édition, facture supprimable seulement
+  en DRAFT, avance non affectable si CANCELLED/REFUNDED.
+- **Idempotence de la création de facture depuis une vente** (`invoices.routes.ts:245-256`) :
+  évite les doublons sur double-clic, un vrai réflexe terrain.
+- **Préservation défensive du `lotId`** lors du remplacement des lignes de facture
+  (`invoices.routes.ts:593-639`), avec plusieurs niveaux de repli — visiblement issu d'un
+  incident réel et bien commenté.
+- **Validation Zod sur toutes les entrées**, avec `safeParse` et retour `400` structuré ; le
+  helper `montantValide()` évite explicitement qu'un `new Decimal()` lève dans un `refine`.
+- **Commentaires métier de grande qualité** en tête de chaque route : les règles (crédit,
+  commission, FIFO, modes PAY/ENCAISSER) sont documentées à l'endroit où elles s'appliquent,
+  ce qui a rendu cet audit possible sans accès à la spécification.
 
 ---
 
-*Audit strictement en lecture seule : aucun fichier du projet modifié, aucune requête POST/PUT/PATCH/DELETE émise, aucun serveur démarré. Seul ce fichier a été créé.*
+*Fin du rapport — 20 problèmes (3 P0, 6 P1, 6 P2, 5 P3).*
