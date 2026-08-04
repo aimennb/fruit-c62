@@ -97,6 +97,7 @@ export interface TotauxJour {
   creditInvoiceTotal: Prisma.Decimal;
   unpaidPartialInvoiceTotal: Prisma.Decimal;
   expenseTotal: Prisma.Decimal;
+  supplierPaymentTotal: Prisma.Decimal;
   cashRemittanceTotal: Prisma.Decimal;
   closingCashFund: Prisma.Decimal;
   autresSorties: Prisma.Decimal;
@@ -162,16 +163,23 @@ export async function calculerTotauxJour(
   }
 
   // --- Encaissements de crédits clients du jour ----------------------
-  const encaissements = await tx.payment.aggregate({
+  // Règle : un « encaissement de crédit » = un paiement reçu AUJOURD'HUI sur
+  // une facture ÉMISE AUPARAVANT (recouvrement d'un crédit antérieur).
+  // ON EXCLUT les paiements de factures émises AUJOURD'HUI : celles-ci sont déjà
+  // comptabilisées en LES VENTES (invoiceTotal). Les y inclure double-comptait
+  // une vente réglée direct (PAID) et la présentait à tort comme « crédit ».
+  const paiementsCredit = await tx.payment.findMany({
     where: {
       paymentDate: { gte: debut, lt: fin },
       invoiceId: { not: null },
       customerId: { not: null },
       deletedAt: null,
+      invoice: { issueDate: { lt: debut } },
     },
-    _sum: { amount: true },
+    select: { amount: true },
   });
-  const creditCollectionTotal = D(encaissements._sum.amount ?? 0);
+  let creditCollectionTotal = ZERO;
+  for (const p of paiementsCredit) creditCollectionTotal = creditCollectionTotal.plus(D(p.amount));
 
   // --- Lignes de caisse manuelles ------------------------------------
   const jourExistant = await tx.cashRegisterDay.findUnique({ where: { date: jour(date) } });
@@ -183,6 +191,7 @@ export async function calculerTotauxJour(
 
   let cashSupplyTotal = ZERO;
   let expenseTotal = ZERO;
+  let supplierPaymentTotal = ZERO;
   let cashRemittanceTotal = ZERO;
   let closingCashFund = ZERO;
   let autresEntrees = ZERO;
@@ -195,6 +204,13 @@ export async function calculerTotauxJour(
         break;
       case 'EXPENSE':
         expenseTotal = expenseTotal.plus(m);
+        break;
+      case 'SUPPLIER_PAYMENT':
+        // Sortie dédiée aux règlements fournisseurs (CASH) — SÉPARÉE des dépenses
+        // d'exploitation, comme les encaissements de crédit clients ont leur propre
+        // ligne. Ne doit PAS polluer expenseTotal (bug 3 corrigé : un règlement
+        // fournisseur n'est pas une « dépense » métier).
+        supplierPaymentTotal = supplierPaymentTotal.plus(m);
         break;
       case 'REMITTANCE':
         cashRemittanceTotal = cashRemittanceTotal.plus(m);
@@ -219,6 +235,7 @@ export async function calculerTotauxJour(
   // crédit est déjà comptabilisé en entrées via creditInvoiceTotal (montant total).
   const totalOutputs = creditInvoiceTotal
     .plus(expenseTotal)
+    .plus(supplierPaymentTotal)
     .plus(cashRemittanceTotal)
     .plus(closingCashFund)
     .plus(autresSorties);
@@ -233,6 +250,7 @@ export async function calculerTotauxJour(
     creditInvoiceTotal,
     unpaidPartialInvoiceTotal,
     expenseTotal,
+    supplierPaymentTotal,
     cashRemittanceTotal,
     closingCashFund,
     autresSorties,
@@ -259,6 +277,8 @@ export async function recalculerEtPersister(
       creditInvoiceTotal: t.creditInvoiceTotal,
       unpaidPartialInvoiceTotal: t.unpaidPartialInvoiceTotal,
       expenseTotal: t.expenseTotal,
+      // supplierPaymentTotal n'est PAS persisté sur cashRegisterDay (recalculé à la
+      // volée dans calculerTotauxJour, comme les autres totaux dérivés de lignes).
       cashRemittanceTotal: t.cashRemittanceTotal,
       totalOutputs: t.totalOutputs,
       difference: t.difference,
@@ -304,6 +324,7 @@ function serializeTotaux(t: TotauxJour) {
     creditInvoiceTotal: t.creditInvoiceTotal.toString(),
     unpaidPartialInvoiceTotal: t.unpaidPartialInvoiceTotal.toString(),
     expenseTotal: t.expenseTotal.toString(),
+    supplierPaymentTotal: t.supplierPaymentTotal.toString(),
     cashRemittanceTotal: t.cashRemittanceTotal.toString(),
     closingCashFund: t.closingCashFund.toString(),
     autresSorties: t.autresSorties.toString(),
@@ -414,6 +435,35 @@ router.get('/days/:date', async (req: Request, res: Response) => {
         deduction: true,
       });
     }
+    // Règlements fournisseurs du jour (sortie CASH dédiée, SÉPARÉE des dépenses).
+    if (!totaux.supplierPaymentTotal.isZero()) {
+      // Récupère le nom de chaque fournisseur pour l'affichage.
+      const crefe = await prisma.cashRegisterEntry.findMany({
+        where: { cashRegisterDayId: day ? day.id : '', sourceType: 'SUPPLIER_PAYMENT', deletedAt: null },
+        select: { sourceId: true, amount: true, reference: true, description: true },
+      });
+      const spIds = Array.from(new Set(crefe.map((e) => e.sourceId).filter(Boolean) as string[]));
+      const spMap = spIds.length
+        ? await prisma.supplierPayment.findMany({
+            where: { id: { in: spIds } },
+            include: { supplier: { select: { name: true } } },
+          })
+        : [];
+      const spName = new Map(spMap.map((s: any) => [s.id, s.supplier?.name ?? '—']));
+      for (const e of crefe) {
+        const nom = spName.get(e.sourceId as string) ?? e.description ?? '—';
+        virtuelles.push({
+          id: `virt-supplier-pay-${e.sourceId}`,
+          direction: 'OUTPUT',
+          category: `Règlement fournisseur — ${nom}`,
+          amount: dec(e.amount),
+          sourceType: 'SUPPLIER_PAYMENT',
+          reference: e.reference ?? null,
+          virtuel: true,
+          deduction: false,
+        });
+      }
+    }
     if (!opening.isZero()) {
       virtuelles.unshift({
         id: 'virt-opening-fund',
@@ -504,6 +554,10 @@ router.get('/days/:date/credit-collections', async (req: Request, res: Response)
         invoiceId: { not: null },
         customerId: { not: null },
         deletedAt: null,
+        // Ne liste QUE le recouvrement de crédits antérieurs (facture émise avant
+        // le jour) — cohérent avec l'agrégat creditCollectionTotal (sinon une vente
+        // réglée direct le jour même y apparaîtrait à tort).
+        invoice: { issueDate: { lt: b.debut } },
       },
       include: {
         invoice: { select: { id: true, reference: true, total: true, status: true } },
@@ -616,6 +670,44 @@ router.get('/days/:date/remittances', async (req: Request, res: Response) => {
   }
 });
 
+// --- GET /days/:date/supplier-payments — règlements fournisseurs du jour (CASH).
+// Liste CHAQUE règlement avec le NOM du fournisseur (source de vérité = SupplierPayment).
+router.get('/days/:date/supplier-payments', async (req: Request, res: Response) => {
+  const b = bornesOu400(req, res);
+  if (!b) return;
+  try {
+    const crefe = await prisma.cashRegisterEntry.findMany({
+      where: {
+        sourceType: 'SUPPLIER_PAYMENT',
+        deletedAt: null,
+        cashRegisterDayId: (await prisma.cashRegisterDay.findUnique({ where: { date: jour(b.dateParam) } }))?.id ?? '',
+      },
+      select: { sourceId: true, amount: true, reference: true, description: true },
+    });
+    const spIds = Array.from(new Set(crefe.map((e) => e.sourceId).filter(Boolean) as string[]));
+    const spMap = spIds.length
+      ? await prisma.supplierPayment.findMany({
+          where: { id: { in: spIds }, deletedAt: null },
+          include: { supplier: { select: { id: true, name: true } } },
+        })
+      : [];
+    const spById = new Map(spMap.map((s: any) => [s.id, s]));
+    const items = crefe.map((e: any) => {
+      const sp = e.sourceId ? spById.get(e.sourceId) : undefined;
+      return {
+        id: e.sourceId ?? e.reference ?? e.description,
+        sourceId: e.sourceId,
+        reference: e.reference ?? null,
+        supplierName: (sp as any)?.supplier?.name ?? e.description ?? '—',
+        amount: dec(e.amount),
+      };
+    });
+    res.json({ date: b.dateParam, items, total: items.length });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message ?? 'Erreur chargement règlements fournisseurs du jour' });
+  }
+});
+
 // =====================================================================
 // GET /api/cash-register/days/:date/pdf — bordereau de caisse A5 portrait.
 // Réutilise EXACTEMENT la même logique de calcul que le GET détail.
@@ -640,7 +732,11 @@ router.get('/days/:date/pdf', async (req: Request, res: Response) => {
       cashSupplyTotal: t.cashSupplyTotal.toString(),
       consignation: 0, // non géré par le module
       totalEntries: t.totalEntries.toString(),
-      expenseTotal: t.expenseTotal.toString(),
+      // PDF : « LES DEPENSES » regroupe frais d'exploitation + règlements fournisseurs
+      // (conformément à la demande : sur le bordereau papier, on garde les
+      // règlements fournisseurs dans la case dépenses, même s'ils sont séparés
+      // dans l'UI/calcul métier via supplierPaymentTotal).
+      expenseTotal: t.expenseTotal.plus(t.supplierPaymentTotal).toString(),
       creditInvoiceTotal: t.creditInvoiceTotal.toString(),
       closingCashFund: t.closingCashFund.toString(),
       cashRemittanceTotal: t.cashRemittanceTotal.toString(),

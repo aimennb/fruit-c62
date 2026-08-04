@@ -1,6 +1,8 @@
 // =====================================================================
 // BON DE RÉCEPTION FOURNISSEUR (Étape 1 module Bordereau Fournisseur).
-// Règle métier : 1 bon de réception = 1 lot = 1 bordereau.
+// Règle métier : 1 réception = 1 bordereau (N lots/calibres possibles,
+// tous rattachés au même bordereau via stockLot.bordereauId). On ne recycle
+// JAMAIS un bordereau ouvert : chaque réception crée son propre bordereau.
 // À la validation (POST) : entrée marchandise, +stock (nb colis),
 // création auto du lot, du bordereau fournisseur, mouvement IN,
 // et avance éventuelle (SupplierAdvance + écriture compte fournisseur).
@@ -183,15 +185,11 @@ router.post('/', requirePermission('RECEPTION_WRITE'), async (req: Request, res:
         },
       });
 
-      // 2) Bordereau UNIQUE par (fournisseur, produit) SANS calibre — recherche d'un ouvert.
-      let bordereau = await tx.supplierBordereau.findFirst({
-        where: {
-          supplierId: data.supplierId,
-          productId: data.productId,
-          statut: 'ouvert',
-          deletedAt: null,
-        },
-      });
+      // 2) RÈGLE MÉTIER : 1 réception = 1 bordereau. On ne recherche PAS de
+      // bordereau ouvert à recycler (ancien comportement buggé : une réception
+      // du lendemain retombait dans le bordereau ouvert de la veille, mélangeant
+      // lots/ventes/commissions). On crée toujours un NOUVEAU bordereau.
+      let bordereau: any = null;
 
       // 3) N lots (1 par ligne calibre) + mouvements IN + lignes réception
       const lots: any[] = [];
@@ -242,39 +240,29 @@ router.post('/', requirePermission('RECEPTION_WRITE'), async (req: Request, res:
         );
       }
 
-      // 4) Bordereau : cumul si existant, sinon création (calibre = null).
-      if (bordereau) {
-        bordereau = await tx.supplierBordereau.update({
-          where: { id: bordereau.id },
-          data: {
-            colisRecus: { increment: totalColis },
-            colisRestant: { increment: totalColis },
-            droitMarche: { increment: droitMarche },
-            transport: { increment: transport },
-          },
-        });
-      } else {
-        const refBF = await nextRef('supplierBordereau', 'reference', 'BF');
-        const eanBF = await nextEan13(tx, 'supplierBordereau', EAN_PREFIX.bordereau);
-        bordereau = await tx.supplierBordereau.create({
-          data: {
-            reference: refBF,
-            ean13: eanBF,
-            supplierId: data.supplierId,
-            productId: data.productId,
-            receptionId: reception.id,
-            lotId: lots[0].id,
-            calibre: null,
-            colisRecus: totalColis,
-            colisVendus: D(0),
-            colisRestant: totalColis,
-            droitMarche,
-            transport,
-            statut: 'ouvert',
-            dateOuverture: now,
-          },
-        });
-      }
+      // 4) Bordereau : création SYSTÉMATIQUE d'un nouveau bordereau pour cette
+      // réception (règle 1 réception = 1 bordereau, même si un bordereau ouvert
+      // existe déjà pour le même fournisseur/produit).
+      const refBF = await nextRef('supplierBordereau', 'reference', 'BF');
+      const eanBF = await nextEan13(tx, 'supplierBordereau', EAN_PREFIX.bordereau);
+      bordereau = await tx.supplierBordereau.create({
+        data: {
+          reference: refBF,
+          ean13: eanBF,
+          supplierId: data.supplierId,
+          productId: data.productId,
+          receptionId: reception.id,
+          lotId: lots[0].id,
+          calibre: null,
+          colisRecus: totalColis,
+          colisVendus: D(0),
+          colisRestant: totalColis,
+          droitMarche,
+          transport,
+          statut: 'ouvert',
+          dateOuverture: now,
+        },
+      });
       // Rattacher tous les lots au bordereau
       await tx.stockLot.updateMany({
         where: { id: { in: lots.map((l) => l.id) } },
