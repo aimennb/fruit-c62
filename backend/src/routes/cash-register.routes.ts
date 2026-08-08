@@ -163,23 +163,26 @@ export async function calculerTotauxJour(
   }
 
   // --- Encaissements de crédits clients du jour ----------------------
-  // Règle : un « encaissement de crédit » = un paiement reçu AUJOURD'HUI sur
-  // une facture ÉMISE AUPARAVANT (recouvrement d'un crédit antérieur).
-  // ON EXCLUT les paiements de factures émises AUJOURD'HUI : celles-ci sont déjà
-  // comptabilisées en LES VENTES (invoiceTotal). Les y inclure double-comptait
-  // une vente réglée direct (PAID) et la présentait à tort comme « crédit ».
+  // Même règle que l'endpoint /days/:date/credit-collections : on inclut les
+  // paiements sur factures à crédit (SENT/PARTIALLY_PAID/OVERDUE) émises le jour
+  // même, et on exclut uniquement la vente comptant du jour (PAID + émise le
+  // jour même, déjà dans invoiceTotal).
   const paiementsCredit = await tx.payment.findMany({
     where: {
       paymentDate: { gte: debut, lt: fin },
       invoiceId: { not: null },
       customerId: { not: null },
       deletedAt: null,
-      invoice: { issueDate: { lt: debut } },
     },
-    select: { amount: true },
+    include: { invoice: { select: { status: true, issueDate: true } } },
   });
   let creditCollectionTotal = ZERO;
-  for (const p of paiementsCredit) creditCollectionTotal = creditCollectionTotal.plus(D(p.amount));
+  for (const p of paiementsCredit) {
+    const inv = (p as any).invoice;
+    if (!inv) continue;
+    if (inv.status !== 'PAID') creditCollectionTotal = creditCollectionTotal.plus(D(p.amount));
+    else if (new Date(inv.issueDate) < debut) creditCollectionTotal = creditCollectionTotal.plus(D(p.amount));
+  }
 
   // --- Lignes de caisse manuelles ------------------------------------
   const jourExistant = await tx.cashRegisterDay.findUnique({ where: { date: jour(date) } });
@@ -519,7 +522,9 @@ router.get('/days/:date', async (req: Request, res: Response) => {
 
     res.json({
       date: dateParam,
-      day: day ? serializeDay(day) : null,
+      // Fusionne les totaux RECALCULÉS (à la volée) par-dessus la base figée,
+      // pour que le frontend lise toujours la source de vérité (ex: creditCollectionTotal).
+      day: day ? { ...serializeDay(day), ...serializeTotaux(totaux) } : null,
       status: day?.status ?? 'ouverte',
       closedBy: day?.closedBy ?? null,
       closedAt: day?.closedAt ?? null,
