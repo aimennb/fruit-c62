@@ -56,6 +56,7 @@ export interface BordereauPdfDTO {
   statut: string;
   lines: BordereauVenteLine[];
   totalBrutVentes: string | number;
+  poidsNetTotal?: string | number;
   commissionType: string;
   commissionValue: string | number;
   commissionAmount: string | number;
@@ -270,7 +271,28 @@ export function buildBordereauPdf(r: BordereauPdfDTO, company: CompanyParams): P
     }
   }
 
-  // ---------------- BLOC CALCULS ----------------
+  // Ligne de total « Poids net total » (somme des ventes, pertes exclues)
+  if (r.lines.length > 0) {
+    const totalLabelFr = 'Poids net total';
+    const fillY = y;
+    doc.rect(m, fillY, contentW, rowH).fill('#e8f0e8');
+    doc.fillColor('#000000');
+    for (let i = 0; i < cols.length; i++) {
+      const x = colX[i];
+      const w = cols[i].w * contentW;
+      doc.rect(x, fillY, w, rowH).lineWidth(0.4).stroke('#000000');
+    }
+    // Cellules fusionnées Date..Produit (index 0 à 3)
+    const labelW = colX[4] - colX[0];
+    doc.font('Helvetica-Bold').fontSize(8).fillColor('#000000')
+      .text(totalLabelFr, colX[0] + 4, fillY + rowH / 2 - 4, { width: labelW - 8, align: 'left' });
+    doc.font('Amiri').fontSize(8).fillColor('#000000')
+      .text(shapeArabic('إجمالي الوزن الصافي'), colX[0] + 4, fillY + rowH / 2 - 4, { width: labelW - 8, align: 'right' });
+    // Poids net total (index 4)
+    doc.font('Helvetica-Bold').fontSize(8).fillColor('#000000')
+      .text(`${fmt(r.poidsNetTotal ?? 0, 2)}`, colX[4] + 4, fillY + rowH / 2 - 4, { width: cols[4].w * contentW - 8, align: 'right' });
+    y += rowH;
+  }
   y += 12;
   const boxW = contentW * 0.42;
   const boxX = tableRight - boxW;

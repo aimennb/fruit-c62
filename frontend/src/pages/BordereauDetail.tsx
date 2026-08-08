@@ -66,6 +66,7 @@ interface BordereauDetail {
   commissionValue: string
   avancesAffectees: string
   totalBrutVentes: string
+  poidsNetTotal?: string
   commission: string
   montantFinalDu: string
   droitMarche?: string
@@ -367,6 +368,13 @@ export default function BordereauDetail() {
               </tr>
             ))
           )}
+          {b.ventes.length > 0 && (
+            <tr className="bg-gray-50 font-semibold">
+              <td colSpan={5} className="px-4 py-2">{ar ? 'إجمالي الوزن الصافي' : 'Poids net total'}</td>
+              <td className="px-4 py-2 text-right">{Number(b.poidsNetTotal ?? 0).toFixed(2)}</td>
+              <td colSpan={2}></td>
+            </tr>
+          )}
         </Table>
       </div>
 
@@ -408,9 +416,10 @@ export default function BordereauDetail() {
               <Select value={commissionType} onChange={(e) => setCommissionType(e.target.value)}>
                 <option value="pourcentage">{ar ? 'نسبة مئوية %' : 'Pourcentage %'}</option>
                 <option value="fixe">{ar ? 'مبلغ ثابت' : 'Montant fixe'}</option>
+                <option value="poids">{ar ? 'بالوزن (دج/كغ)' : 'Prix/kg net (DA/kg)'}</option>
               </Select>
             </Field>
-            <Field label={commissionType === 'fixe' ? (ar ? 'المبلغ (دج)' : 'Montant (DA)') : (ar ? 'النسبة (%)' : 'Taux (%)')}>
+            <Field label={commissionType === 'fixe' ? (ar ? 'المبلغ (دج)' : 'Montant (DA)') : commissionType === 'poids' ? (ar ? 'السعر/كغ (دج)' : 'Prix/kg (DA)') : (ar ? 'النسبة (%)' : 'Taux (%)')}>
               <Input type="number" min="0" step="0.01" value={commissionValue} disabled={isCloture} onChange={(e) => setCommissionValue(e.target.value)} />
             </Field>
           </div>

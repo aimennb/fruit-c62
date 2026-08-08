@@ -45,8 +45,14 @@ async function getCompanyParams(): Promise<CompanyParams> {
 }
 
 /** Calcule le montant de la commission selon type/value. */
-function computeCommission(totalBrut: Prisma.Decimal, type: string, value: Prisma.Decimal): Prisma.Decimal {
+function computeCommission(
+  totalBrut: Prisma.Decimal,
+  type: string,
+  value: Prisma.Decimal,
+  poidsNetTotal: Prisma.Decimal = new Prisma.Decimal(0),
+): Prisma.Decimal {
   if (type === 'fixe') return value.toDecimalPlaces(2);
+  if (type === 'poids') return poidsNetTotal.times(value).toDecimalPlaces(2);
   // pourcentage
   return totalBrut.times(value).dividedBy(100).toDecimalPlaces(2);
 }
@@ -127,7 +133,11 @@ async function getSalesLinesForBordereau(bordereau: { id: string; lotId?: string
   const totalBrut = lines
     .reduce((acc, l) => acc.plus(new Prisma.Decimal(l.montant)), new Prisma.Decimal(0))
     .toDecimalPlaces(2);
-  return { lines, totalBrut, lotIds };
+  // Poids net total = SOMME des netWeight des lignes de vente UNIQUEMENT (pertes exclues).
+  const poidsNetTotal = lines
+    .reduce((acc, l) => acc.plus(new Prisma.Decimal(l.netWeight)), new Prisma.Decimal(0))
+    .toDecimalPlaces(3);
+  return { lines, totalBrut, poidsNetTotal, lotIds };
 }
 
 /** Pertes agrégées de tous les lots du bordereau. */
@@ -205,9 +215,9 @@ router.get('/:id', async (req: Request, res: Response) => {
     prisma.supplierReception.findUnique({ where: { id: b.receptionId } }),
   ]);
 
-  const { lines, totalBrut, lotIds } = await getSalesLinesForBordereau(b);
+  const { lines, totalBrut, poidsNetTotal, lotIds } = await getSalesLinesForBordereau(b);
   const commissionValue = new Prisma.Decimal(b.commissionValue);
-  const commission = computeCommission(totalBrut, b.commissionType, commissionValue);
+  const commission = computeCommission(totalBrut, b.commissionType, commissionValue, poidsNetTotal);
   const avancesAffectees = new Prisma.Decimal(b.avancesAffectees);
   const droitMarche = new Prisma.Decimal(b.droitMarche ?? 0);
   const transport = new Prisma.Decimal(b.transport ?? 0);
@@ -254,6 +264,7 @@ router.get('/:id', async (req: Request, res: Response) => {
     ventes: lines,
     // Calculs recalculés à la volée (source de vérité = InvoiceItem du lot)
     totalBrutVentes: totalBrut.toString(),
+    poidsNetTotal: poidsNetTotal.toString(),
     commission: commission.toString(),
     montantFinalDu: montantFinalDu.toString(),
     // Pertes (affichage seul)
@@ -264,7 +275,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 });
 
 const patchSchema = z.object({
-  commissionType: z.enum(['pourcentage', 'fixe']).optional(),
+  commissionType: z.enum(['pourcentage', 'fixe', 'poids']).optional(),
   commissionValue: z.union([z.number(), z.string()]).optional(),
   statut: z.enum(['ouvert', 'pret_a_cloturer', 'cloture', 'partiellement_paye', 'paye', 'annule']).optional(),
   notes: z.string().optional().nullable(),
@@ -288,8 +299,8 @@ router.patch('/:id', async (req: Request, res: Response) => {
     const commissionType = data.commissionType ?? b.commissionType;
     const commissionValue = data.commissionValue !== undefined ? D(String(data.commissionValue)) : new Prisma.Decimal(b.commissionValue);
 
-    const { totalBrut } = await getSalesLinesForBordereau(b);
-    const commission = computeCommission(totalBrut, commissionType, commissionValue);
+    const { totalBrut, poidsNetTotal } = await getSalesLinesForBordereau(b);
+    const commission = computeCommission(totalBrut, commissionType, commissionValue, poidsNetTotal);
     const avancesAffectees = new Prisma.Decimal(b.avancesAffectees);
     const droitMarche = new Prisma.Decimal(b.droitMarche ?? 0);
     const transport = new Prisma.Decimal(b.transport ?? 0);
@@ -370,8 +381,8 @@ async function allocateAdvance(bordereauId: string, advanceId: string, amount: P
     });
 
     const newAvancesAffectees = new Prisma.Decimal(b.avancesAffectees).plus(amount).toDecimalPlaces(2);
-    const { totalBrut } = await getSalesLinesForBordereau(b);
-    const commission = computeCommission(totalBrut, b.commissionType, new Prisma.Decimal(b.commissionValue));
+    const { totalBrut, poidsNetTotal } = await getSalesLinesForBordereau(b);
+    const commission = computeCommission(totalBrut, b.commissionType, new Prisma.Decimal(b.commissionValue), poidsNetTotal);
     const droitMarche = new Prisma.Decimal(b.droitMarche ?? 0);
     const transport = new Prisma.Decimal(b.transport ?? 0);
     const montantFinalDu = totalBrut.minus(commission).minus(newAvancesAffectees).minus(droitMarche).minus(transport).toDecimalPlaces(2);
@@ -446,8 +457,8 @@ router.delete('/:id/avances/:allocationId', async (req: Request, res: Response) 
         data: { allocatedAmount: newAllocated, status },
       });
       const newAvances = Prisma.Decimal.max(D(b.avancesAffectees).minus(amount), D(0)).toDecimalPlaces(2);
-      const { totalBrut } = await getSalesLinesForBordereau(b);
-      const commission = computeCommission(totalBrut, b.commissionType, D(b.commissionValue));
+      const { totalBrut, poidsNetTotal } = await getSalesLinesForBordereau(b);
+      const commission = computeCommission(totalBrut, b.commissionType, D(b.commissionValue), poidsNetTotal);
       const droitMarche = new Prisma.Decimal(b.droitMarche ?? 0);
       const transport = new Prisma.Decimal(b.transport ?? 0);
       const montantFinalDu = totalBrut.minus(commission).minus(newAvances).minus(droitMarche).minus(transport).toDecimalPlaces(2);
@@ -476,8 +487,8 @@ router.patch('/:id/cloture', async (req: Request, res: Response) => {
     if (new Prisma.Decimal(b.colisVendus).lessThan(b.colisRecus)) {
       return res.status(400).json({ error: 'Clôture impossible : colis vendus < colis reçus' });
     }
-    const { totalBrut } = await getSalesLinesForBordereau(b);
-    const commission = computeCommission(totalBrut, b.commissionType, new Prisma.Decimal(b.commissionValue));
+    const { totalBrut, poidsNetTotal } = await getSalesLinesForBordereau(b);
+    const commission = computeCommission(totalBrut, b.commissionType, new Prisma.Decimal(b.commissionValue), poidsNetTotal);
     const avances = new Prisma.Decimal(b.avancesAffectees);
     const droitMarche = new Prisma.Decimal(b.droitMarche ?? 0);
     const transport = new Prisma.Decimal(b.transport ?? 0);
@@ -513,7 +524,7 @@ router.patch('/:id/cloture', async (req: Request, res: Response) => {
 // PATCH /api/supplier-bordereaux/:id/correct — opération corrective (bordereau clôturé)
 const correctSchema = z.object({
   motif: z.string(),
-  commissionType: z.enum(['pourcentage', 'fixe']).optional(),
+  commissionType: z.enum(['pourcentage', 'fixe', 'poids']).optional(),
   commissionValue: z.union([z.number(), z.string()]).optional(),
   avancesAffectees: z.union([z.number(), z.string()]).optional(),
 });
@@ -548,8 +559,8 @@ router.patch('/:id/correct', async (req: Request, res: Response) => {
       if (data.avancesAffectees !== undefined)
         corrections.push(await mk('avancesAffectees', D(b.avancesAffectees).toString(), avances.toString()));
 
-      const { totalBrut } = await getSalesLinesForBordereau(b);
-      const commission = computeCommission(totalBrut, commissionType, commissionValue);
+      const { totalBrut, poidsNetTotal } = await getSalesLinesForBordereau(b);
+      const commission = computeCommission(totalBrut, commissionType, commissionValue, poidsNetTotal);
       const droitMarche = new Prisma.Decimal(b.droitMarche ?? 0);
       const transport = new Prisma.Decimal(b.transport ?? 0);
       const montantFinalDu = totalBrut.minus(commission).minus(avances).minus(droitMarche).minus(transport).toDecimalPlaces(2);
@@ -590,9 +601,9 @@ router.get('/:id/pdf', async (req: Request, res: Response) => {
       prisma.stockLot.findUnique({ where: { id: b.lotId } }),
     ]);
 
-    const { lines, totalBrut, lotIds } = await getSalesLinesForBordereau(b);
+    const { lines, totalBrut, poidsNetTotal, lotIds } = await getSalesLinesForBordereau(b);
     const commissionValue = new Prisma.Decimal(b.commissionValue);
-    const commission = computeCommission(totalBrut, b.commissionType, commissionValue);
+    const commission = computeCommission(totalBrut, b.commissionType, commissionValue, poidsNetTotal);
     const avancesAffectees = new Prisma.Decimal(b.avancesAffectees);
     const droitMarche = new Prisma.Decimal(b.droitMarche ?? 0);
     const transport = new Prisma.Decimal(b.transport ?? 0);
@@ -641,6 +652,7 @@ router.get('/:id/pdf', async (req: Request, res: Response) => {
           montant: l.montant,
         })),
         totalBrutVentes: totalBrut.toString(),
+        poidsNetTotal: poidsNetTotal.toString(),
         commissionType: b.commissionType,
         commissionValue: dec(b.commissionValue) ?? '0',
         commissionAmount: commission.toString(),
