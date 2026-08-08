@@ -1184,6 +1184,7 @@ model Expense {
   heure         String?
   motif         String
   category      String?
+  type          String        @default("depense") // 'depense' | 'entree'
   amount        Decimal       @db.Decimal(14, 2)
   paymentMethod PaymentMethod @default(CASH)
   observation   String?

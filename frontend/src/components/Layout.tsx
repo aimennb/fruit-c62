@@ -22,6 +22,7 @@ const NAV: NavItem[] = [
   { to: '/receptions', fr: 'Réceptions', ar: 'وصولات الاستلام' },
   { to: '/caisse', fr: 'Caisse', ar: 'الصندوق' },
   { to: '/depenses', fr: 'Dépenses', ar: 'المصاريف' },
+  { to: '/entrees', fr: 'Entrées', ar: 'المداخل' },
 ]
 
 // Mapping route -> permission requise pour l'affichage dans le menu.
@@ -40,6 +41,7 @@ const NAV_PERM: Record<string, string> = {
   '/receptions': 'RECEPTION_WRITE',
   '/caisse': 'PAYMENT_READ',
   '/depenses': 'PAYMENT_READ',
+  '/entrees': 'PAYMENT_READ',
 }
 
 const ICONS: Record<string, ReactNode> = {
@@ -78,6 +80,9 @@ const ICONS: Record<string, ReactNode> = {
   ),
   '/depenses': (
     <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 3v18"/><path d="M17 8a4 4 0 0 0-4-3h-2a3 3 0 0 0 0 6h2a3 3 0 0 1 0 6h-2a4 4 0 0 1-4-3"/></svg>
+  ),
+  '/entrees': (
+    <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 19V5"/><path d="M7 10a4 4 0 0 1 4-3h2a3 3 0 0 1 0 6h-2a3 3 0 0 0 0 6h2a4 4 0 0 0 4-3"/></svg>
   ),
 }
 

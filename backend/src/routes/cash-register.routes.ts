@@ -763,6 +763,8 @@ const expenseSchema = z.object({
   heure: z.string().optional(),
   motif: z.string().min(1, 'motif requis'),
   category: z.string().optional().nullable(),
+  // 'depense' | 'entree' (entrée = rentrée d'argent hors ventes, reliée à la caisse).
+  type: z.enum(['depense', 'entree']).optional().default('depense'),
   amount: z.union([z.string(), z.number()]),
   paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'CHECK', 'CARD']).optional(),
   observation: z.string().optional().nullable(),
@@ -800,12 +802,18 @@ router.post('/expenses', async (req: Request, res: Response) => {
         e.status = 409;
         throw e;
       }
+      const typeDep = parsed.data.type ?? 'depense';
+      // Pour une dépense : sortie de caisse (OUTPUT / EXPENSE).
+      // Pour une entrée : rentrée d'argent (ENTRY / OTHER_ENTRY).
+      const direction = typeDep === 'entree' ? 'ENTRY' : 'OUTPUT';
+      const sourceType = typeDep === 'entree' ? 'OTHER_ENTRY' : 'EXPENSE';
       const expense = await tx.expense.create({
         data: {
           date: dateDep,
           heure: parsed.data.heure ?? heureCourante(),
           motif: parsed.data.motif,
           category: parsed.data.category ?? null,
+          type: typeDep,
           amount: montant,
           paymentMethod: (parsed.data.paymentMethod ?? 'CASH') as any,
           observation: parsed.data.observation ?? null,
@@ -813,14 +821,14 @@ router.post('/expenses', async (req: Request, res: Response) => {
           userId: parsed.data.userId ?? (req as any).user?.id ?? null,
         },
       });
-      await assertPasDeDoublon(tx, 'EXPENSE', expense.id);
+      await assertPasDeDoublon(tx, sourceType, expense.id);
       const entry = await tx.cashRegisterEntry.create({
         data: {
           cashRegisterDayId: day.id,
-          direction: 'OUTPUT',
-          category: parsed.data.category ?? 'Dépense',
+          direction,
+          category: parsed.data.category ?? (typeDep === 'entree' ? 'Entrée' : 'Dépense'),
           amount: montant,
-          sourceType: 'EXPENSE',
+          sourceType,
           sourceId: expense.id,
           description: parsed.data.motif,
           createdBy: (req as any).user?.id ?? null,
@@ -856,6 +864,10 @@ router.get('/expenses', async (req: Request, res: Response) => {
       const { debut, fin } = bornesJour(req.query.date);
       where.date = { gte: debut, lt: fin };
     }
+    // Filtre optionnel par type ('depense' | 'entree'). Si absent : renvoie TOUT
+    // (rétro-compatibilité : /depenses filtrera type=depense côté front).
+    const typeQ = typeof req.query.type === 'string' ? req.query.type : undefined;
+    if (typeQ) where.type = typeQ;
     const items = await prisma.expense.findMany({ where, orderBy: { date: 'desc' } });
     res.json({
       items: items.map((x) => ({ ...x, amount: dec(x.amount) })),
@@ -886,12 +898,17 @@ router.patch('/expenses/:id/cancel', async (req: Request, res: Response) => {
         throw e;
       }
       const day = await getOrCreateDay(tx, expense.date);
+      // L'annulation crée la ligne INVERSE de la direction d'origine :
+      // dépense (OUTPUT) -> ENTRY ; entrée (ENTRY) -> OUTPUT.
+      const origDirection: 'ENTRY' | 'OUTPUT' = expense.type === 'entree' ? 'ENTRY' : 'OUTPUT';
+      const inverseDirection: 'ENTRY' | 'OUTPUT' = origDirection === 'ENTRY' ? 'OUTPUT' : 'ENTRY';
+      const libelleAnnul = expense.type === 'entree' ? 'Annulation d\'entrée' : 'Annulation de dépense';
       await assertPasDeDoublon(tx, 'OTHER_ENTRY', `cancel-expense-${expense.id}`);
       const inverse = await tx.cashRegisterEntry.create({
         data: {
           cashRegisterDayId: day.id,
-          direction: 'ENTRY',
-          category: 'Annulation de dépense',
+          direction: inverseDirection,
+          category: libelleAnnul,
           amount: D(expense.amount),
           sourceType: 'OTHER_ENTRY',
           sourceId: `cancel-expense-${expense.id}`,

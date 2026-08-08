@@ -25,6 +25,8 @@ import CaissePage from './pages/CaissePage'
 import CaisseDayDetail from './pages/CaisseDayDetail'
 import DepensesPage from './pages/DepensesPage'
 import ExpenseNew from './pages/ExpenseNew'
+import EntreesPage from './pages/EntreesPage'
+import EntreeNew from './pages/EntreeNew'
 import CashSupplyPage from './pages/CashSupplyPage'
 import CashRemittancePage from './pages/CashRemittancePage'
 import CloturePage from './pages/CloturePage'
@@ -125,6 +127,8 @@ function Protected() {
         <Route path="/caisse/:date" element={<CaisseDayDetail />} />
         <Route path="/depenses" element={<DepensesPage />} />
         <Route path="/depenses/nouvelle" element={<ExpenseNew />} />
+        <Route path="/entrees" element={<EntreesPage />} />
+        <Route path="/entrees/nouvelle" element={<EntreeNew />} />
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>
     </Layout>

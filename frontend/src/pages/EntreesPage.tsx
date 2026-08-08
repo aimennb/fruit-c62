@@ -1,11 +1,11 @@
-// Liste des dépenses de caisse + filtre par date + annulation.
+// Liste des entrées de caisse (rentrées d'argent hors ventes) + annulation.
 import { useEffect, useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getExpenses, cancelExpense, type Expense } from '../api'
 import { PageHeader, Button, Input, Field, Table, Spinner, ErrorBox, EmptyState, Badge } from '../components/ui'
 import { fmtDA, fmtDate, MODES_PAIEMENT } from './caisse-utils'
 
-export default function DepensesPage() {
+export default function EntreesPage() {
   const navigate = useNavigate()
   const [items, setItems] = useState<Expense[]>([])
   const [loading, setLoading] = useState(true)
@@ -17,7 +17,7 @@ export default function DepensesPage() {
     setLoading(true)
     setError(null)
     try {
-      const r = await getExpenses(date || undefined, 'depense')
+      const r = await getExpenses(date || undefined, 'entree')
       setItems(r.items ?? [])
     } catch (e: any) {
       setError(e?.message ?? 'Erreur de chargement')
@@ -31,7 +31,7 @@ export default function DepensesPage() {
   }, [load])
 
   async function onCancel(id: string) {
-    if (!confirm('Annuler cette dépense ? Une ligne inverse sera créée en caisse.')) return
+    if (!confirm('Annuler cette entrée ? Une ligne inverse sera créée en caisse.')) return
     setError(null)
     try {
       await cancelExpense(id)
@@ -52,14 +52,14 @@ export default function DepensesPage() {
   return (
     <div>
       <PageHeader
-        title="Dépenses"
-        subtitle="Dépenses de caisse (sorties d'argent)"
+        title="Entrées"
+        subtitle="Entrées de caisse (rentrées d'argent)"
         actions={
           <div className="flex flex-wrap gap-2">
             <Button variant="secondary" disabled title="Bientôt disponible">
               Export PDF / Excel (bientôt)
             </Button>
-            <Button onClick={() => navigate('/depenses/nouvelle')}>Nouvelle dépense</Button>
+            <Button onClick={() => navigate('/entrees/nouvelle')}>Nouvelle entrée</Button>
           </div>
         }
       />
@@ -75,7 +75,7 @@ export default function DepensesPage() {
 
       {error && <ErrorBox message={error} />}
       {loading && <Spinner label="Chargement…" />}
-      {!loading && filtres.length === 0 && <EmptyState message="Aucune dépense trouvée." />}
+      {!loading && filtres.length === 0 && <EmptyState message="Aucune entrée trouvée." />}
 
       {!loading && filtres.length > 0 && (
         <Table
@@ -90,7 +90,7 @@ export default function DepensesPage() {
               <td className="px-4 py-3 text-xs text-gray-500">{x.id.slice(-6).toUpperCase()}</td>
               <td className="px-4 py-3 font-medium text-gray-800">{x.motif}</td>
               <td className="px-4 py-3 text-gray-600">{x.category ?? '—'}</td>
-              <td className="px-4 py-3 text-red-600 font-semibold">{fmtDA(x.amount)}</td>
+              <td className="px-4 py-3 text-green-600 font-semibold">{fmtDA(x.amount)}</td>
               <td className="px-4 py-3 text-gray-600">{modeLabel(x.paymentMethod)}</td>
               <td className="px-4 py-3 text-gray-500 text-xs">{x.userId ?? '—'}</td>
               <td className="px-4 py-3">

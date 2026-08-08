@@ -53,6 +53,14 @@ export const CATEGORIES_DEPENSE = [
   'Divers',
 ]
 
+/** Catégories d'entrée (rentrées d'argent hors ventes) dédiées. */
+export const CATEGORIES_ENTREE = [
+  'Remboursement client',
+  'Apport / Capital',
+  'Reprise invendus',
+  'Autre entree',
+]
+
 /** Modes de paiement (alignés sur l'enum PaymentMethod du backend). */
 export const MODES_PAIEMENT = [
   { value: 'CASH', label: 'Espèces' },

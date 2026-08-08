@@ -664,6 +664,7 @@ export interface Expense {
   heure?: string | null
   motif: string
   category?: string | null
+  type?: string // 'depense' | 'entree' (défaut 'depense')
   amount: string
   paymentMethod: string
   observation?: string | null
@@ -704,18 +705,29 @@ export function getCashDay(date: string) {
   return request<CashDayDetail>(`/api/cash-register/days/${date}`)
 }
 
-/** Liste des dépenses (filtre date optionnel). */
-export function getExpenses(date?: string) {
-  const qs = date ? `?date=${date}` : ''
-  return request<{ items: Expense[]; total: number }>(`/api/cash-register/expenses${qs}`)
+/** Liste des dépenses/entrées (filtre date + type optionnels). */
+export function getExpenses(date?: string, type?: string) {
+  const params = new URLSearchParams()
+  if (date) params.set('date', date)
+  if (type) params.set('type', type)
+  const qs = params.toString()
+  return request<{ items: Expense[]; total: number }>(
+    `/api/cash-register/expenses${qs ? `?${qs}` : ''}`,
+  )
 }
 
-/** Création d'une dépense (génère une sortie de caisse). */
+/** Liste des entrées de caisse (type='entree'). */
+export function getEntrees(date?: string) {
+  return getExpenses(date, 'entree')
+}
+
+/** Création d'une dépense/entrée (génère une ligne de caisse). */
 export function createExpense(data: {
   date?: string
   heure?: string
   motif: string
   category?: string | null
+  type?: 'depense' | 'entree'
   amount: number | string
   paymentMethod?: string
   observation?: string | null
