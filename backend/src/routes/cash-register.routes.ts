@@ -189,6 +189,20 @@ export async function calculerTotauxJour(
       })
     : [];
 
+  // Exclure les lignes OTHER_ENTRY / OTHER_OUTPUT liées à une expense annulée
+  // (ligne d'origine + sa ligne d'annulation inverse « cancel-expense-* »).
+  const sourceIds = lignes
+    .filter((l) => (l.sourceType === 'OTHER_ENTRY' || l.sourceType === 'OTHER_OUTPUT') && l.sourceId)
+    .map((l) => l.sourceId)
+    .filter((x): x is string => x !== null);
+  const annulees = sourceIds.length
+    ? await tx.expense.findMany({
+        where: { id: { in: sourceIds }, status: 'annulee', deletedAt: null },
+        select: { id: true },
+      })
+    : [];
+  const annuleesSet = new Set(annulees.map((e) => e.id));
+
   let cashSupplyTotal = ZERO;
   let expenseTotal = ZERO;
   let supplierPaymentTotal = ZERO;
@@ -197,6 +211,11 @@ export async function calculerTotauxJour(
   let autresEntrees = ZERO;
   let autresSorties = ZERO;
   for (const l of lignes) {
+    // Skip des lignes liées à une expense annulée (origine + annulation inverse).
+    if (l.sourceType === 'OTHER_ENTRY' || l.sourceType === 'OTHER_OUTPUT') {
+      const baseId = (l.sourceId || '').replace(/^cancel-expense-/, '');
+      if (baseId && annuleesSet.has(baseId)) continue;
+    }
     const m = D(l.amount);
     switch (l.sourceType) {
       case 'CASH_SUPPLY':
@@ -387,6 +406,20 @@ router.get('/days/:date', async (req: Request, res: Response) => {
         })
       : [];
 
+    // Exclure les lignes OTHER_ENTRY / OTHER_OUTPUT liées à une expense annulée
+    // (ligne d'origine + sa ligne d'annulation inverse « cancel-expense-* »).
+    const sourceIds = lignes
+      .filter((l) => (l.sourceType === 'OTHER_ENTRY' || l.sourceType === 'OTHER_OUTPUT') && l.sourceId)
+      .map((l) => l.sourceId)
+      .filter((x): x is string => x !== null);
+    const annulees = sourceIds.length
+      ? await prisma.expense.findMany({
+          where: { id: { in: sourceIds }, status: 'annulee', deletedAt: null },
+          select: { id: true },
+        })
+      : [];
+    const annuleesSet = new Set(annulees.map((e) => e.id));
+
     // Lignes « virtuelles » calculées à la volée (jamais stockées) —
     // elles matérialisent les factures/encaissements et les déductions
     // de rapprochement dans l'affichage.
@@ -476,7 +509,12 @@ router.get('/days/:date', async (req: Request, res: Response) => {
       });
     }
 
-    const reelles = lignes.map((l) => ({ ...serializeEntry(l), virtuel: false, deduction: false }));
+    const lignesVisibles = lignes.filter((l) => {
+      if (l.sourceType !== 'OTHER_ENTRY' && l.sourceType !== 'OTHER_OUTPUT') return true;
+      const baseId = (l.sourceId || '').replace(/^cancel-expense-/, '');
+      return !(baseId && annuleesSet.has(baseId));
+    });
+    const reelles = lignesVisibles.map((l) => ({ ...serializeEntry(l), virtuel: false, deduction: false }));
     const toutes = [...virtuelles, ...reelles];
 
     res.json({
@@ -548,24 +586,36 @@ router.get('/days/:date/credit-collections', async (req: Request, res: Response)
   const b = bornesOu400(req, res);
   if (!b) return;
   try {
+    // On récupère tous les paiements clients liés à une facture du jour (sans
+    // filtrer sur issueDate), puis on filtre côté app pour exclure la vente
+    // comptant du jour (facture devenue PAID le jour même = déjà dans les ventes
+    // comptant) tout en gardant les avances sur factures à crédit émises le jour
+    // même (SENT/PARTIALLY_PAID/OVERDUE).
     const paiements = await prisma.payment.findMany({
       where: {
         paymentDate: { gte: b.debut, lt: b.fin },
         invoiceId: { not: null },
         customerId: { not: null },
         deletedAt: null,
-        // Ne liste QUE le recouvrement de crédits antérieurs (facture émise avant
-        // le jour) — cohérent avec l'agrégat creditCollectionTotal (sinon une vente
-        // réglée direct le jour même y apparaîtrait à tort).
-        invoice: { issueDate: { lt: b.debut } },
       },
       include: {
-        invoice: { select: { id: true, reference: true, total: true, status: true } },
+        invoice: {
+          select: { id: true, reference: true, total: true, status: true, issueDate: true },
+        },
         customer: { select: { name: true } },
       },
       orderBy: { paymentDate: 'asc' },
     });
-    const items = paiements.map((p: any) => ({
+    // Garder le paiement si la facture est à crédit (non PAID), OU si elle est
+    // PAID mais émise avant le jour (recouvrement d'un crédit antérieur). On
+    // exclut uniquement la vente comptant du jour (PAID + émise le jour même).
+    const paiementsCredits = paiements.filter((p: any) => {
+      const inv = p.invoice;
+      if (!inv) return false;
+      if (inv.status !== 'PAID') return true;
+      return new Date(inv.issueDate) < b.debut;
+    });
+    const items = paiementsCredits.map((p: any) => ({
       id: p.id,
       reference: p.reference,
       invoiceId: p.invoiceId,
