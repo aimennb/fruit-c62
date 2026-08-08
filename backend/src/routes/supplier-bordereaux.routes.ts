@@ -55,35 +55,78 @@ function computeCommission(totalBrut: Prisma.Decimal, type: string, value: Prism
 async function getSalesLinesForBordereau(bordereau: { id: string; lotId?: string | null }) {
   const lotIds = await getBordereauLotIds(prisma, bordereau);
   if (lotIds.length === 0) return { lines: [] as any[], totalBrut: new Prisma.Decimal(0), lotIds };
-  const items = await prisma.invoiceItem.findMany({
-    where: { lotId: { in: lotIds }, deletedAt: null },
-    include: {
-      invoice: { select: { reference: true, issueDate: true } },
-      product: { select: { name: true } },
-      lot: { select: { id: true, lotNumber: true, caliber: true } },
-    },
+  // Charger les VRAIES prises (StockMovement OUT) portant le bon lotId par prise.
+  // Une vente FIFO multi-lots génère autant de movements qu'il y a de lots touchés ;
+  // on répartit le montant proportionnellement aux caisses prises dans chaque lot.
+  const movements = await prisma.stockMovement.findMany({
+    where: { lotId: { in: lotIds }, type: 'OUT', deletedAt: null },
+    include: { product: { select: { name: true } } },
     orderBy: { createdAt: 'asc' },
   });
-  const lines = items.map((it) => {
-    const netWeight = new Prisma.Decimal(it.netWeight);
-    const unitPrice = new Prisma.Decimal(it.unitPrice);
-    const montant = netWeight.times(unitPrice).toDecimalPlaces(2);
-    return {
-      id: it.id,
-      invoiceId: it.invoiceId,
-      date: it.invoice?.issueDate ?? it.createdAt,
-      invoiceRef: it.invoice?.reference ?? '—',
-      colis: dec(it.colis),
-      productName: it.product?.name ?? it.description ?? '—',
-      lotId: it.lotId,
-      lotNumber: (it as any).lot?.lotNumber ?? null,
-      calibre: (it as any).lot?.caliber ?? null,
-      netWeight: dec(it.netWeight),
-      unitPrice: dec(it.unitPrice),
-      montant: montant.toString(),
-    };
+  if (movements.length === 0) return { lines: [] as any[], totalBrut: new Prisma.Decimal(0), lotIds };
+
+  // Lots du bordereau (lotNumber/calibre) une seule fois.
+  const lots = await prisma.stockLot.findMany({
+    where: { id: { in: lotIds } },
+    select: { id: true, lotNumber: true, caliber: true },
   });
-  const totalBrut = lines.reduce((acc, l) => acc.plus(new Prisma.Decimal(l.montant)), new Prisma.Decimal(0)).toDecimalPlaces(2);
+  const lotMap = new Map(lots.map((l) => [l.id, l]));
+
+  // Batch des ventes + factures pour éviter le N+1.
+  const refsUniques = Array.from(new Set(movements.map((m) => m.reference).filter(Boolean) as string[]));
+  const sales = await prisma.sale.findMany({
+    where: { reference: { in: refsUniques }, deletedAt: null },
+    include: {
+      items: {
+        where: { deletedAt: null },
+        include: { product: { select: { id: true, name: true } } },
+      },
+    },
+  });
+  const salesMap = new Map(sales.map((s) => [s.reference, s]));
+  const invoices = await prisma.invoice.findMany({
+    where: { saleId: { in: sales.map((s) => s.id) }, deletedAt: null },
+    select: { id: true, reference: true, issueDate: true, saleId: true },
+  });
+  const invoicesMap = new Map(invoices.map((inv) => [inv.saleId, inv]));
+
+  const lines: any[] = [];
+  for (const movement of movements) {
+    if (!movement.quantity || new Prisma.Decimal(movement.quantity).lessThanOrEqualTo(0)) continue; // lot figé à 0 compat
+    const sale = movement.reference ? salesMap.get(movement.reference) : undefined;
+    if (!sale) continue; // vente soft-deleted
+    const saleItem = sale.items.find((it) => it.productId === movement.productId);
+    if (!saleItem) continue;
+
+    const invoice = invoicesMap.get(sale.id);
+    const colisPris = new Prisma.Decimal(movement.quantity); // movement.quantity = caisses prises dans ce lot
+    const colisTotal = new Prisma.Decimal(saleItem.colis ?? saleItem.quantity ?? 0);
+    const netPerColis = colisTotal.gt(0)
+      ? new Prisma.Decimal(saleItem.netWeight).div(colisTotal)
+      : new Prisma.Decimal(saleItem.netWeight); // cas rare : movement.quantity déjà = poids net
+    const netPris = netPerColis.times(colisPris);
+    const unitPrice = new Prisma.Decimal(saleItem.unitPrice);
+    const montant = netPris.times(unitPrice).toDecimalPlaces(2);
+
+    const lotInfo = movement.lotId ? lotMap.get(movement.lotId) : undefined;
+    lines.push({
+      id: movement.id,
+      invoiceId: invoice?.id ?? null,
+      date: invoice?.issueDate ?? movement.createdAt,
+      invoiceRef: invoice?.reference ?? sale.reference,
+      colis: colisPris.toString(),
+      productName: movement.product?.name ?? saleItem.product?.name ?? (saleItem as any).description ?? '—',
+      lotId: movement.lotId,
+      lotNumber: lotInfo?.lotNumber ?? null,
+      calibre: lotInfo?.caliber ?? null,
+      netWeight: netPris.toString(),
+      unitPrice: dec(saleItem.unitPrice),
+      montant: montant.toString(),
+    });
+  }
+  const totalBrut = lines
+    .reduce((acc, l) => acc.plus(new Prisma.Decimal(l.montant)), new Prisma.Decimal(0))
+    .toDecimalPlaces(2);
   return { lines, totalBrut, lotIds };
 }
 

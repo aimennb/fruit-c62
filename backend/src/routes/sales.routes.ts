@@ -535,9 +535,11 @@ router.post('/:id/confirm', requirePermission('SALE_WRITE'), async (req: Request
             throw Object.assign(new Error(`Lot introuvable pour ${it.product.name}`), { status: 400 });
           }
           const lotRemaining = new Prisma.Decimal(lot.remainingQuantity);
+
+          // COMPAT BORDEREAU : lot figé déjà à 0 -> on trace le mouvement sans
+          // décrémenter, mais on bloque toute demande > 0 (on ne puise pas ailleurs
+          // dans ce cas de conservation de compat).
           if (lotRemaining.lte(0)) {
-            // Lot à 0 : compat bordereau — on trace le mouvement sans décrémenter,
-            // mais on bloque si l'utilisateur demande plus que 0.
             if (remainingToTake.gt(0)) {
               throw Object.assign(
                 new Error(`Stock insuffisant pour ${it.product.name} : 0 colis disponibles`),
@@ -548,19 +550,51 @@ router.post('/:id/confirm', requirePermission('SALE_WRITE'), async (req: Request
             itemPrimaryLot.set(it.id, explicitLotId);
             continue;
           }
-          if (lotRemaining.lt(remainingToTake)) {
+
+          // FIFO STRICT par (produit + fournisseur du lot figé) : on puise dans
+          // tous les lots du MÊME fournisseur, du plus ancien au plus récent.
+          // On NE puit JAMAIS chez un autre fournisseur.
+          const supplierId = lot.supplierId;
+          let lots = await tx.stockLot.findMany({
+            where: { productId, supplierId, deletedAt: null, remainingQuantity: { gt: new Prisma.Decimal(0) } },
+            orderBy: { arrivalDate: 'asc' }, // FIFO : plus ancien d'abord
+          });
+          // Forcer le lot figé en tête (il est déjà le plus ancien en FIFO asc ;
+          // s'il n'y est pas — ex. à 0, déjà géré plus haut — on le réinsère en tête).
+          if (!lots.find((l) => l.id === explicitLotId)) {
+            lots = [lot, ...lots];
+          }
+
+          // Stock dispo total pour ce (produit + fournisseur) -> FIFO multi-lots.
+          const available = lots.reduce((acc, l) => acc.plus(new Prisma.Decimal(l.remainingQuantity)), new Prisma.Decimal(0));
+          if (available.lt(remainingToTake)) {
             throw Object.assign(
-              new Error(`Stock insuffisant pour ${it.product.name} : ${lotRemaining.toString()} colis disponibles (demandé ${remainingToTake.toString()})`),
+              new Error(`Stock insuffisant pour ${it.product.name} (fournisseur ${supplierId ?? '—'}) : ${available.toString()} colis disponibles (demandé ${remainingToTake.toString()})`),
               { status: 400 },
             );
           }
-          const newRemaining = lotRemaining.minus(remainingToTake).toDecimalPlaces(3);
-          await tx.stockLot.update({
-            where: { id: lot.id },
-            data: { remainingQuantity: newRemaining, updatedBy: req.user!.id },
-          });
-          movements.push({ productId, lotId: explicitLotId, quantity: colisQty });
-          itemPrimaryLot.set(it.id, explicitLotId);
+
+          // Itère sur la liste FIFO et décrémente remainingQuantity par prise.
+          for (const l of lots) {
+            if (remainingToTake.lte(0)) break;
+            const lr = new Prisma.Decimal(l.remainingQuantity);
+            if (lr.lte(0)) continue;
+            const take = remainingToTake.gt(lr) ? lr : remainingToTake;
+
+            await tx.stockLot.update({
+              where: { id: l.id },
+              data: { remainingQuantity: lr.minus(take).toDecimalPlaces(3), updatedBy: req.user!.id },
+            });
+
+            movements.push({ productId, lotId: l.id, quantity: take });
+            // Lot primaire = 1er lot de la liste consommée (le plus ancien touché).
+            if (!itemPrimaryLot.has(it.id)) itemPrimaryLot.set(it.id, l.id);
+            remainingToTake = remainingToTake.minus(take);
+          }
+          if (!remainingToTake.eq(0)) {
+            // Sécurité (dispo vérifié plus haut) — ne devrait jamais arriver.
+            throw Object.assign(new Error(`Stock insuffisant pour ${it.product.name}`), { status: 400 });
+          }
           continue;
         }
 
